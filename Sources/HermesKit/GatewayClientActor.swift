@@ -201,6 +201,18 @@ public actor GatewayClient: GatewayClientProtocol {
             try await existing.value
             return
         }
+        // A socket that exists but has not finished its handshake is NOT "no connection": dialing a
+        // second one here abandoned the first (deallocated `URLSessionWebSocketTask` → close 1001
+        // "client closed"), which is what a normal `start()` from a view `.task` during a handshake
+        // or a reconnect used to do. The gateway then published the turn's `message.delta` frames to
+        // the abandoned socket and the reply only appeared after the next resume re-read history.
+        if transport != nil {
+            if case .failed = stateBox.current { /* fall through and dial a replacement */ }
+            else {
+                try await waitForExistingSocket()
+                return
+            }
+        }
         let task = Task { try await self.performConnect() }
         connectTask = task
         defer { connectTask = nil }
@@ -463,6 +475,25 @@ public actor GatewayClient: GatewayClientProtocol {
             throw error
         }
         setState(.open)
+    }
+
+    /// Wait for a socket that is **already dialed** to finish its handshake, without touching
+    /// `readySignal` (the connect/reconnect task that owns the handshake holds that).
+    ///
+    /// A caller that arrives mid-handshake must not dial a second socket: the first one is then
+    /// released by `beginConnection`, the OS closes it as 1001 "client closed", and any event the
+    /// gateway had already routed to it (a streaming turn) is lost.
+    private func waitForExistingSocket() async throws {
+        let deadline = Date().addingTimeInterval(timeouts.handshake)
+        while Date() < deadline {
+            if sawReady { return }
+            // The socket went away: whoever owns the dial reports its own outcome through the state
+            // events, and turning that into an error here would paint a failure over a reconnect.
+            if transport == nil { return }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        if sawReady { return }
+        throw GatewayError.transportClosed("gateway did not become ready")
     }
 
     /// `gateway.ready` is always the first frame, so waiting for it is what turns "socket opened"
@@ -743,7 +774,14 @@ public actor GatewayClient: GatewayClientProtocol {
         connectionGeneration += 1
         pump?.cancel()
         pump = nil
-        transport = nil
+        // Never drop a live socket on the floor: a released `URLSessionWebSocketTask` is closed by
+        // the OS as 1001 "client closed" while the gateway still believes it is attached, so a turn
+        // in flight streams into nothing. Close it deliberately — the bytes cost nothing and the
+        // gateway then re-attaches on the next resume instead of publishing to a dead peer.
+        if let replaced = transport {
+            transport = nil
+            Task { await replaced.disconnect(reason: "connection replaced") }
+        }
         sawReady = false
         failReady(GatewayError.transportClosed("connection replaced"))
         return connectionGeneration

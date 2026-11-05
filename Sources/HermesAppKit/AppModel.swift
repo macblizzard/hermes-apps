@@ -57,6 +57,13 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var sessions: [SessionSummary] = []
     @Published public private(set) var sessionsLoading = false
     @Published public var selectedSessionID: SessionID?
+    /// Sessions this app created that the host has not persisted yet (see `newSession`).
+    ///
+    /// `session.create` deliberately writes no row until the first prompt, so a draft cannot be
+    /// resumed: the host answers `4007 session not found` and the pane used to paint that as a
+    /// dead host. Drafts are adopted locally and leave this set once `prompt.submit` has persisted
+    /// the row.
+    @Published public private(set) var draftSessionIDs: Set<SessionID> = []
     @Published public private(set) var transcript: [TranscriptEntry] = []
     @Published public private(set) var runningSessions: Set<SessionID> = []
 
@@ -284,6 +291,8 @@ public final class AppModel: ObservableObject {
     private func resetForBotSwitch() {
         botEpoch += 1
         selectedSessionID = nil
+        // Drafts are scoped to the bot that created them (a draft has no profile on the host yet).
+        draftSessionIDs = []
         sessions = []
         transcript = []
         streamingText = ""
@@ -309,6 +318,10 @@ public final class AppModel: ObservableObject {
         contextUsed = nil
         contextMax = nil
         pendingRequests = []
+        // A draft has no row on the host yet: resuming it answers 4007 "session not found", which
+        // used to be painted as an unreachable host. Its pane is empty by definition, so adopt it
+        // locally and let the first prompt persist the row — the next select is a real resume.
+        if draftSessionIDs.contains(id) { return }
         // A resume that is still in flight when the bot (or the session) changes must not land:
         // it carries the transcript of the thing the user just left.
         let epoch = botEpoch
@@ -320,7 +333,10 @@ public final class AppModel: ObservableObject {
             adopt(resumed, session: id)
         } catch {
             guard epoch == botEpoch, selectedSessionID == id else { return }
-            connection = .failed("could not resume session: \(error.localizedDescription)")
+            // A session that cannot be opened is not a dead host: the socket is fine, and blaming
+            // the connection here painted "cannot connect to the server" over a session-level
+            // error (and then suppressed the reconnect that would have fixed a real drop).
+            lastSendError = "could not open this session: \(error.localizedDescription)"
         }
     }
 
@@ -407,6 +423,9 @@ public final class AppModel: ObservableObject {
         runningSessions.insert(sid)
         do {
             try await client.submit(session: sid, text: text)
+            // The first prompt is what persists a draft into a real row, so from now on this
+            // session resumes like any other.
+            draftSessionIDs.remove(sid)
         } catch {
             isStreaming = false
             lastSendError = error.localizedDescription
@@ -434,12 +453,26 @@ public final class AppModel: ObservableObject {
         defer { sessionsLoading = false }
         do {
             let created = try await client.createSession(model: model, provider: provider, profile: selectedBotID)
+            // `session.create` mints a **draft**: the gateway deliberately writes no row until the
+            // first prompt (so abandoned launches do not litter "Untitled" sessions). A draft is
+            // therefore not resumable — `session.resume` answers 4007 "session not found" — and the
+            // create reply is already everything the pane needs. Adopt it instead of selecting it,
+            // which used to fire that resume and paint "could not resume session" as a dead host.
+            draftSessionIDs.insert(created)
+            selectedSessionID = created
+            transcript = []
+            streamingText = ""
+            isStreaming = false
+            pendingRequests = []
+            lastSendError = nil
             sessions = try await client.listSessions(limit: 50, profile: selectedBotID, includeHidden: true)
-            await select(created)
         } catch {
             lastSendError = "could not start a session: \(error.localizedDescription)"
         }
     }
+
+    /// True while a created session has no row on the host yet (see `newSession`).
+    public func isDraft(_ id: SessionID) -> Bool { draftSessionIDs.contains(id) }
 
     /// Retry a dropped connection without losing the open session.
     public func retryConnection() async {
@@ -488,6 +521,9 @@ public final class AppModel: ObservableObject {
             // `createSession` answers with the **stored** id, which is what a later resume needs.
             let created = try await client.createSession(model: nil, provider: nil, profile: botID)
             Self.defaults.set(created, forKey: key)
+            // The row does not exist until the first prompt, so this is a draft: mark it before
+            // `select`, whose resume would otherwise answer 4007 and report an unreachable host.
+            draftSessionIDs.insert(created)
             await select(created)
             return created
         } catch {
