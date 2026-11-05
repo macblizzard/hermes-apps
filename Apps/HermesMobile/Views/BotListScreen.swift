@@ -20,14 +20,38 @@ struct BotListScreen: View {
     @EnvironmentObject private var app: AppEnvironment
 
     @State private var query = ""
+    @AppStorage("lastOpenedBotsByHost") private var lastOpenedBotsJSON = "{}"
+
+    private var lastOpenedBots: [String: String] {
+        guard let data = lastOpenedBotsJSON.data(using: .utf8),
+              let bots = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return bots
+    }
+
+    private var hostKey: String? { app.store.host?.baseURL.absoluteString }
+
+    private var lastOpenedID: String? {
+        guard let hostKey else { return nil }
+        return lastOpenedBots[hostKey]
+    }
+
+    private func recordOpened(_ bot: Bot) {
+        guard let hostKey else { return }
+        var bots = lastOpenedBots
+        bots[hostKey] = bot.id
+        guard let data = try? JSONEncoder().encode(bots),
+              let json = String(data: data, encoding: .utf8) else { return }
+        lastOpenedBotsJSON = json
+    }
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var filtered: [Bot] {
-        guard !trimmedQuery.isEmpty else { return model.bots }
-        return model.bots.filter { bot in
+        let ordered = LastOpenedBot.order(model.bots, lastOpenedID: lastOpenedID)
+        guard !trimmedQuery.isEmpty else { return ordered }
+        return ordered.filter { bot in
             bot.displayName.localizedCaseInsensitiveContains(trimmedQuery)
                 || bot.id.localizedCaseInsensitiveContains(trimmedQuery)
         }
@@ -67,6 +91,7 @@ struct BotListScreen: View {
     private func row(for bot: Bot) -> some View {
         Button {
             Haptics.selection()
+            recordOpened(bot)
             onOpenBot(bot)
         } label: {
             HStack(spacing: 12) {
@@ -89,6 +114,13 @@ struct BotListScreen: View {
 
                 Spacer(minLength: 8)
 
+                if bot.id == lastOpenedID {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                }
+
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Tokens.textDim)
@@ -101,7 +133,7 @@ struct BotListScreen: View {
         .listRowBackground(Tokens.canvas)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-        .accessibilityLabel("\(bot.displayName), bot")
+        .accessibilityLabel(bot.id == lastOpenedID ? "\(bot.displayName), bot, last opened" : "\(bot.displayName), bot")
         .accessibilityHint("Opens the conversation with this bot")
     }
 

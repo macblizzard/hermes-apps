@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import HermesKit
 import HermesAppKit
 import OpenBotUI
@@ -23,6 +24,10 @@ struct ConversationScreen: View {
     @State private var notice: String?
     @State private var lastSeenRequestCount = 0
     @State private var hasLoaded = false
+    @State private var keyboardHeight: CGFloat = 0
+    @State private var keyboardScreenSize: CGSize = .zero
+    @State private var keyboardScrollTask: Task<Void, Never>?
+    @State private var isDraggingTranscript = false
 
     private static let bottomID = "conversation-bottom"
 
@@ -140,6 +145,20 @@ struct ConversationScreen: View {
                     .padding(.bottom, 20)
             }
             .scrollDismissesKeyboard(.interactively)
+            .simultaneousGesture(DragGesture(minimumDistance: 5)
+                .onChanged { _ in
+                    isDraggingTranscript = true
+                    keyboardScrollTask?.cancel()
+                }
+                .onEnded { _ in isDraggingTranscript = false })
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
+                keyboardFrameChanged(notification, proxy: proxy)
+            }
+            .onDisappear {
+                keyboardScrollTask?.cancel()
+                keyboardHeight = 0
+                isDraggingTranscript = false
+            }
             .onChange(of: model.transcript.count) {
                 scroll(proxy, animated: true)
             }
@@ -406,6 +425,37 @@ struct ConversationScreen: View {
                 set: { presented in
                     if !presented { notice = nil }
                 })
+    }
+
+    /// Scroll after the keyboard's safe-area animation has settled, not when focus first
+    /// changes (at that point the scroll view still has its old height). Frame changes also
+    /// cover keyboard size changes and rotation; dismissal never pulls history to the bottom.
+    private func keyboardFrameChanged(_ notification: Notification, proxy: ScrollViewProxy) {
+        guard let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+        let screen = UIScreen.main.bounds
+        let intersection = screen.intersection(frame)
+        let height = !intersection.isNull && frame.maxY >= screen.maxY - 1
+            ? intersection.height : 0
+        let previousHeight = keyboardHeight
+        let sizeChanged = keyboardScreenSize != .zero && keyboardScreenSize != screen.size
+        keyboardScreenSize = screen.size
+        guard abs(height - previousHeight) > 1 || sizeChanged else { return }
+        keyboardHeight = height
+        keyboardScrollTask?.cancel()
+        // A shrinking keyboard reveals more history; do not fight interactive dismissal.
+        guard height > 0, !isDraggingTranscript,
+              height > previousHeight || sizeChanged else { return }
+
+        let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
+        keyboardScrollTask = Task { @MainActor in
+            // Allow the keyboard animation and the following SwiftUI layout pass to finish.
+            let delay = max(0, min(duration, 2)) + 0.05
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch { return }
+            guard !Task.isCancelled, !isDraggingTranscript else { return }
+            scroll(proxy, animated: false)
+        }
     }
 
     private func scroll(_ proxy: ScrollViewProxy, animated: Bool) {
