@@ -13,7 +13,7 @@ concurrency:
 jobs:
   packages:
     name: Swift packages (build + test)
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
@@ -27,7 +27,7 @@ jobs:
 
   apps:
     name: Apps (macOS + iOS simulator)
-    runs-on: macos-15
+    runs-on: macos-26
     needs: packages
     steps:
       - uses: actions/checkout@v4
@@ -63,7 +63,7 @@ jobs:
 
   ipa:
     name: Unsigned .ipa (for FlareStore)
-    runs-on: macos-15
+    runs-on: macos-26
     needs: packages
     steps:
       - uses: actions/checkout@v4
