@@ -418,16 +418,41 @@ final class GatewayClientTests: XCTestCase {
         XCTAssertEqual(params?["session_id"]?.stringValue, "stored-1")
     }
 
-    func testCreateSessionReturnsTheRuntimeID() async throws {
+    /// A created session is returned by its **stored** id.
+    ///
+    /// Callers treat the result as a session-list identity and hand it straight to
+    /// `session.resume`, which refuses a runtime id with `4007` — so returning the runtime id
+    /// (the old behaviour this test used to assert) opened a "new chat" that could not be resumed.
+    func testCreateSessionReturnsTheStoredID() async throws {
         let fake = FakeGateway()
         let client = makeClient(fake)
         try await client.connect()
 
         let id = try await client.createSession(model: "claude-x", provider: "anthropic")
-        XCTAssertEqual(id, "rt-new")
+        XCTAssertEqual(id, "stored-new", "callers resume and list by the stored id")
         let params = await fake.params(method: "session.create")
         XCTAssertEqual(params?["model"]?.stringValue, "claude-x")
         XCTAssertEqual(params?["provider"]?.stringValue, "anthropic")
+    }
+
+    /// Sending into a resumed session must address it by its **runtime** id.
+    ///
+    /// Measured against the real gateway: `prompt.submit` with the stored id answers
+    /// `4001 session not found` in ~2 ms while the socket is perfectly healthy, which is exactly
+    /// the failure the app shipped. The stored id is what the session list shows, so the client has
+    /// to translate — this test pins that translation in place.
+    func testSubmitAfterResumeAddressesTheRuntimeID() async throws {
+        let fake = FakeGateway()
+        let client = makeClient(fake)
+        try await client.connect()
+
+        _ = try await client.resumeSession("stored-1")
+        try await client.submit(session: "stored-1", text: "hi")
+
+        let params = await fake.params(method: "prompt.submit")
+        XCTAssertEqual(params?["session_id"]?.stringValue, "rt-1",
+                       "the resumed session's runtime id, not the stored id the UI holds")
+        XCTAssertEqual(params?["text"]?.stringValue, "hi")
     }
 
     func testHistoryKeepsTheNewestRows() async throws {
