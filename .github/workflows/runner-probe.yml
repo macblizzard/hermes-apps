@@ -1,0 +1,9 @@
+name: runner-probe
+on:
+  push:
+    branches: [probe/macos-runner]
+jobs:
+  probe:
+    runs-on: macos-26
+    steps:
+      - run: swift --version && xcodebuild -version
