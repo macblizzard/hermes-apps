@@ -107,3 +107,33 @@ value must not echo to a client. Render exactly what you receive; never reconstr
 the tool call.
 
 **Withdrawal event**: `request.cancel` with `{"id","method","reason"}`.
+
+---
+
+## 7. Every profile-scoped method takes `profile`, not just `session.list`
+
+Measured on a live multiplexed gateway (15 bots), and the cause of a real mis-delete during this
+deployment: `session.delete` resolves its database from `params["profile"]`
+(`_profile_db(params, writer=True)`). Called without it, it searches the gateway's *default*
+profile and answers `4007 session not found` — which looks like a missing row, not a wrong scope.
+
+So any session-level method that touches storage must carry the bot's id:
+
+```
+session.list   {limit, include_hidden: true, profile}
+session.create {profile}            # binds the session's profile_home for its whole life
+session.delete {session_id, profile}
+session.title / session.archive / session.close …
+```
+
+Calls that act on an already-attached session (`prompt.submit`, `session.resume`,
+`session.interrupt`) do not need it: the session carries its own `profile_home`.
+
+Two related facts from the same session:
+
+- `session.create` returns a **runtime** id immediately, and a `stored_session_id` once the session
+  is persisted. No row exists until a turn writes one, so a create followed by `session.list` shows
+  no change — that is correct, not a failure.
+- `session.delete` refuses a session the gateway still holds live (`4023 cannot delete an active
+  session`), even after `session.close`, until the owning process drops it. Restart the gateway (or
+  let the turn fully settle) before deleting.

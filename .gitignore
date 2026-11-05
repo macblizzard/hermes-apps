@@ -27,3 +27,6 @@ __pycache__/
 .env
 *.log
 fixtures/private/
+
+# CI artifacts pulled down locally
+dist/
