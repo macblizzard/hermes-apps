@@ -17,7 +17,7 @@ struct ConversationHeader: View {
         guard let session = model.selectedSession else {
             return store.isPaired ? "not connected" : "no host paired"
         }
-        var parts: [String] = [model.hostName]
+        var parts: [String] = [store.selectedBot?.displayName ?? model.hostName]
         if let updated = session.updatedAt {
             parts.append("updated \(RelativeTime.short(updated))")
         }
@@ -83,6 +83,16 @@ struct ConversationHeader: View {
 
     private var moreMenu: some View {
         Menu {
+            if !model.bots.isEmpty {
+                Menu("Switch bot") {
+                    ForEach(model.bots) { bot in
+                        Button(bot.id == model.selectedBotID ? "✓ \(bot.displayName)" : bot.displayName) {
+                            store.selectBot(bot.id)
+                        }
+                    }
+                }
+                Divider()
+            }
             Button("Command palette…") { store.openPalette() }
             Button("New session") { store.newSession() }
                 .disabled(!model.connection.isLive)

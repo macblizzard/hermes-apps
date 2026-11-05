@@ -61,6 +61,9 @@ struct WorkspaceShell: View {
 
             ConversationPane(model: model, store: store)
                 .frame(minWidth: Geometry.conversationMin, maxWidth: .infinity, maxHeight: .infinity)
+                // A new bot is a new conversation: re-creating the pane drops the old
+                // scroll position and any approval sheet that belonged to the last bot.
+                .id(model.selectedBotID ?? "no-bot")
 
             if store.showsContextPanel {
                 Hairline(.vertical)

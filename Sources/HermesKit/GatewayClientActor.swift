@@ -215,10 +215,27 @@ public actor GatewayClient: GatewayClientProtocol {
         }
     }
 
+    public func listBots() async throws -> [Bot] {
+        let result = try await perform("profiles.list", params: .object([:]), timeout: timeouts.call)
+        return try GatewayPayloadDecoder.bots(result)
+    }
+
     public func listSessions(limit: Int) async throws -> [SessionSummary] {
-        let result = try await perform("session.list",
-                                       params: .object(["limit": .int(Int64(limit))]),
-                                       timeout: timeouts.sessionList)
+        try await listSessions(limit: limit, profile: nil, includeHidden: true)
+    }
+
+    /// `include_hidden` is sent on *every* path, including the unscoped one: without it a normal
+    /// profile answers 0 rows on this backend (measured: `cody` 0 with the filter, 1 with it), and
+    /// "no sessions" is a lie the UI would render as an empty bot.
+    public func listSessions(limit: Int, profile: String?, includeHidden: Bool) async throws -> [SessionSummary] {
+        var params: [String: JSONValue] = [
+            "limit": .int(Int64(limit)),
+            "include_hidden": .bool(includeHidden),
+        ]
+        if let profile, !profile.isEmpty {
+            params["profile"] = .string(profile)
+        }
+        let result = try await perform("session.list", params: .object(params), timeout: timeouts.sessionList)
         return try GatewayPayloadDecoder.sessionSummaries(result)
     }
 
@@ -229,9 +246,16 @@ public actor GatewayClient: GatewayClientProtocol {
     }
 
     public func createSession(model: String?, provider: String?) async throws -> SessionID {
+        try await createSession(model: model, provider: provider, profile: nil)
+    }
+
+    public func createSession(model: String?, provider: String?, profile: String?) async throws -> SessionID {
         var params: [String: JSONValue] = [:]
         if let model { params["model"] = .string(model) }
         if let provider { params["provider"] = .string(provider) }
+        // `profile` binds the new session to that bot for its whole life: the gateway stores the
+        // resulting profile_home and re-binds HERMES_HOME on every turn.
+        if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
         let result = try await perform("session.create", params: .object(params), timeout: timeouts.sessionResume)
         guard let runtimeID = result?["session_id"]?.stringValue else {
             throw GatewayError.malformedResponse(method: "session.create")

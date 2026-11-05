@@ -42,6 +42,9 @@ struct ContextPanelView: View {
         VStack(alignment: .leading, spacing: 7) {
             SectionCaption("SESSION")
 
+            if let bot = store.selectedBot {
+                MacContextRow(label: "Bot", value: bot.displayName, truncates: true)
+            }
             MacContextRow(label: "Host", value: model.hostName)
 
             if let session = model.selectedSession {

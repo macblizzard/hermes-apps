@@ -64,6 +64,12 @@ struct ChatsTab: View {
                 }
         }
         .badge(model.pendingRequests.count)
+        // A pushed conversation belongs to the bot it was opened under. Switching bots
+        // therefore returns to the list rather than leaving one bot's transcript behind
+        // the other bot's sessions.
+        .onChange(of: model.selectedBotID) { _ in
+            path = NavigationPath()
+        }
     }
 }
 

@@ -38,6 +38,20 @@ public final class AppModel: ObservableObject {
     /// Round-trip time of the last `ping`, for the connection chip.
     @Published public private(set) var latencyMS: Int?
 
+    // MARK: Bots
+
+    /// Every bot (Hermes profile) this host serves, in the host's own order.
+    ///
+    /// Empty until `loadBots()` succeeds. A host that predates `profiles.list` leaves this empty
+    /// and the app falls back to one unscoped session list — degraded, but not broken.
+    @Published public private(set) var bots: [Bot] = []
+    @Published public private(set) var botsLoading = false
+    /// The bot whose sessions and transcript are on screen. `nil` means "not chosen yet", which
+    /// is also what an unscoped `session.list` means.
+    @Published public private(set) var selectedBotID: String?
+    /// Why the bot directory could not be read. The bot pane says so rather than "no bots".
+    @Published public private(set) var botsError: String?
+
     // MARK: Sessions
 
     @Published public private(set) var sessions: [SessionSummary] = []
@@ -66,6 +80,9 @@ public final class AppModel: ObservableObject {
 
     private let client: GatewayClientProtocol
     private var eventTask: Task<Void, Never>?
+    /// Bumped whenever the selected bot changes. An in-flight `session.list` compares it before
+    /// publishing, so a slow answer for the bot we left cannot overwrite the bot we are on.
+    private var botEpoch = 0
 
     public init(client: GatewayClientProtocol, hostName: String = "hermes") {
         self.client = client
@@ -74,12 +91,17 @@ public final class AppModel: ObservableObject {
 
     // MARK: Lifecycle
 
+    /// Connect, then learn the bots, then read the selected bot's sessions.
+    ///
+    /// The order is the contract: every session row is scoped to one profile, so a list fetched
+    /// before the bot is known would have to be thrown away (or worse, shown).
     public func start() async {
         connection = .connecting
         do {
             try await client.connect()
             connection = .connected
             await observeEvents()
+            await loadBots()
             await loadSessions()
         } catch {
             connection = .failed(error.localizedDescription)
@@ -95,24 +117,98 @@ public final class AppModel: ObservableObject {
 
     // MARK: Sessions
 
-    public func loadSessions() async {
-        sessionsLoading = true
-        defer { sessionsLoading = false }
+    /// Read the bot directory (Hermes profiles) and settle on a default selection.
+    ///
+    /// Not fatal on failure: an older host answers `session.list` but not `profiles.list`, and one
+    /// unscoped list is still better than a dead window. The reason is kept in `botsError` so the
+    /// bot pane can say what happened instead of implying this host has no bots.
+    public func loadBots() async {
+        botsLoading = true
+        defer { botsLoading = false }
         do {
-            sessions = try await client.listSessions(limit: 50)
+            let loaded = try await client.listBots()
+            bots = loaded
+            botsError = nil
+            if selectedBotID == nil || !loaded.contains(where: { $0.id == selectedBotID }) {
+                selectedBotID = Self.defaultBot(in: loaded, hostName: hostName)?.id
+            }
         } catch {
+            botsError = error.localizedDescription
+        }
+    }
+
+    /// The bot to open with: the host name itself when it is also a profile (a host paired as
+    /// `cody` should land on `cody`), otherwise the first bot the host listed.
+    static func defaultBot(in bots: [Bot], hostName: String) -> Bot? {
+        let wanted = hostName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return bots.first { $0.id.lowercased() == wanted || $0.name.lowercased() == wanted }
+            ?? bots.first
+    }
+
+    /// The selected bot's sessions.
+    ///
+    /// `includeHidden` is deliberately not exposed here: on this backend a normal profile returns
+    /// zero rows without it, so a bots surface that omits it shows every bot as empty.
+    public func loadSessions() async {
+        let bot = selectedBotID
+        let epoch = botEpoch
+        sessionsLoading = true
+        defer { if epoch == botEpoch { sessionsLoading = false } }
+        do {
+            let loaded = try await client.listSessions(limit: 50, profile: bot, includeHidden: true)
+            // Rows requested for the bot we have since left are *another bot's* sessions. Landing
+            // them under this name is exactly the mix the switcher exists to prevent.
+            guard epoch == botEpoch else { return }
+            sessions = loaded
+        } catch {
+            guard epoch == botEpoch else { return }
             // A silent gateway must not look like "no sessions" — surface it.
             connection = .failed("could not load sessions: \(error.localizedDescription)")
         }
+    }
+
+    /// Switch bots.
+    ///
+    /// Everything on screen belongs to the bot it came from — the transcript, the pending
+    /// questions, the half-streamed turn, the running set — so all of it is dropped *before* the
+    /// new bot's list is fetched. A failed load therefore leaves an empty pane, never the previous
+    /// bot's conversation under the new bot's name.
+    public func selectBot(_ id: String?) async {
+        let resolved = id ?? Self.defaultBot(in: bots, hostName: hostName)?.id
+        guard resolved != selectedBotID else {
+            await loadSessions()
+            return
+        }
+        resetForBotSwitch()
+        selectedBotID = resolved
+        await loadSessions()
+    }
+
+    private func resetForBotSwitch() {
+        botEpoch += 1
+        selectedSessionID = nil
+        sessions = []
+        transcript = []
+        streamingText = ""
+        isStreaming = false
+        runningSessions = []
+        pendingRequests = []
+        sending = false
+        lastSendError = nil
     }
 
     public func select(_ id: SessionID) async {
         selectedSessionID = id
         transcript = []
         streamingText = ""
+        isStreaming = false
         pendingRequests = []
+        // A resume that is still in flight when the bot (or the session) changes must not land:
+        // it carries the transcript of the thing the user just left.
+        let epoch = botEpoch
         do {
             let resumed = try await client.resumeSession(id)
+            guard epoch == botEpoch, selectedSessionID == id else { return }
             transcript = resumed.entries
             pendingRequests = resumed.openRequests
             if let inflight = resumed.inflight {
@@ -121,6 +217,7 @@ public final class AppModel: ObservableObject {
                 if inflight.streaming { runningSessions.insert(id) }
             }
         } catch {
+            guard epoch == botEpoch, selectedSessionID == id else { return }
             connection = .failed("could not resume session: \(error.localizedDescription)")
         }
     }
@@ -133,7 +230,8 @@ public final class AppModel: ObservableObject {
         sending = true
         lastSendError = nil
         draft = ""
-        transcript.append(TranscriptEntry(id: UUID().uuidString, role: .user, text: text))
+        let optimisticID = UUID().uuidString
+        transcript.append(TranscriptEntry(id: optimisticID, role: .user, text: text))
         streamingText = ""
         isStreaming = true
         runningSessions.insert(sid)
@@ -143,7 +241,9 @@ public final class AppModel: ObservableObject {
             isStreaming = false
             lastSendError = error.localizedDescription
             draft = text // never lose what the user typed
-            transcript.removeLast()
+            // By id, not by position: switching bots or sessions while the submit was in flight
+            // empties the transcript, and a blind `removeLast()` would trap on it.
+            transcript.removeAll { $0.id == optimisticID }
         }
         sending = false
     }
@@ -163,8 +263,8 @@ public final class AppModel: ObservableObject {
         sessionsLoading = true
         defer { sessionsLoading = false }
         do {
-            let created = try await client.createSession(model: model, provider: provider)
-            sessions = try await client.listSessions(limit: 50)
+            let created = try await client.createSession(model: model, provider: provider, profile: selectedBotID)
+            sessions = try await client.listSessions(limit: 50, profile: selectedBotID, includeHidden: true)
             await select(created)
         } catch {
             lastSendError = "could not start a session: \(error.localizedDescription)"
@@ -214,6 +314,12 @@ public final class AppModel: ObservableObject {
 
     // MARK: Derived state
 
+    /// The bot whose pane is on screen, for the switcher's title and avatar.
+    public var selectedBot: Bot? {
+        guard let selectedBotID else { return nil }
+        return bots.first { $0.id == selectedBotID }
+    }
+
     public var selectedSession: SessionSummary? {
         guard let selectedSessionID else { return nil }
         return sessions.first { $0.id == selectedSessionID }
@@ -260,6 +366,12 @@ public final class AppModel: ObservableObject {
     public static func choices(for request: ServerRequest) -> [String] {
         guard case .array(let values)? = request.params["choices"] else { return [] }
         return values.compactMap { $0.stringValue }
+    }
+
+    /// The session a server request is about. `approval`/`clarify` carry `session`; a resumed
+    /// `open_requests` entry carries `session_id`. `nil` means the host did not say.
+    public static func sessionID(of request: ServerRequest) -> SessionID? {
+        request.params["session_id"]?.stringValue ?? request.params["session"]?.stringValue
     }
 
     /// Answer with one of `choices(for:)`.
@@ -329,6 +441,15 @@ public final class AppModel: ObservableObject {
             isStreaming = false
             runningSessions.remove(session)
         case .request(let request):
+            // A question about a session the user is not looking at would sit under the wrong
+            // conversation. Only filtered when we can tell: a request that names no session (or
+            // arrives with nothing open) is still surfaced, because the agent is blocked on it.
+            if let selected = selectedSessionID,
+               let named = Self.sessionID(of: request),
+               named != selected {
+                return
+            }
+            guard !pendingRequests.contains(where: { $0.id == request.id }) else { return }
             pendingRequests.append(request)
         case .requestCancelled(let id, _):
             pendingRequests.removeAll { $0.id == id }
@@ -420,9 +541,35 @@ public final class PreviewGatewayClient: GatewayClientProtocol, @unchecked Senda
 
     public func ping() async throws {}
 
+    /// Four plausible bots, deliberately different lengths and initials, so a preview of the
+    /// switcher shows the real thing: several assistants, one host, one row selected.
+    public func listBots() async throws -> [Bot] {
+        PreviewGatewayClient.bots
+    }
+
+    static let bots: [Bot] = [
+        Bot(id: "cody", displayName: "Cody"),
+        Bot(id: "atlas", displayName: "Atlas"),
+        Bot(id: "scribe", displayName: "Scribe"),
+        Bot(id: "night-shift", displayName: "Night shift"),
+    ]
+
     public func listSessions(limit: Int) async throws -> [SessionSummary] {
+        try await listSessions(limit: limit, profile: nil, includeHidden: true)
+    }
+
+    /// Deterministic per-bot slices: the first bot keeps the full list (previews elsewhere hard
+    /// code `preview-1`, which must exist), while the others get shorter, disjoint sets so a row
+    /// leaking between bots would be visible on screen rather than plausible.
+    public func listSessions(limit: Int, profile: String?, includeHidden: Bool) async throws -> [SessionSummary] {
         guard scenario != .empty else { return [] }
-        return PreviewGatewayClient.sessions
+        let rows = PreviewGatewayClient.sessions
+        switch profile {
+        case "atlas": return Array(rows.prefix(2))
+        case "scribe": return Array(rows.suffix(1))
+        case "night-shift": return []
+        default: return rows
+        }
     }
 
     /// Deterministic, so two preview renderings of the same scenario are the same picture.

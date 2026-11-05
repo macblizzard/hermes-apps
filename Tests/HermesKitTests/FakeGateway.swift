@@ -18,6 +18,7 @@ actor FakeGateway {
     private var emitReadyOnConnect = true
     private var connectDelay: TimeInterval = 0
     private var results: [String: JSONValue] = [:]
+    private var scopedResults: [String: [String: JSONValue]] = [:]
     private var errors: [String: RPCError] = [:]
     private var silent: Set<String> = []
 
@@ -44,6 +45,25 @@ actor FakeGateway {
     }
 
     func setResult(_ result: JSONValue, for method: String) { results[method] = result }
+
+    /// Answer `method` differently depending on one string parameter.
+    ///
+    /// This is how a test proves the per-bot scoping: `session.list` gets one body for
+    /// `profile=jason` and another for `profile=anika`, so a client that forgets the parameter —
+    /// or applies the wrong bot's answer — cannot pass.
+    func setResult(_ result: JSONValue, for method: String, whenParam param: String, equals value: String) {
+        scopedResults[method, default: [:]][param + "\u{1F}" + value] = result
+    }
+
+    private func scopedResult(method: String, params: JSONValue?) -> JSONValue? {
+        guard let scoped = scopedResults[method], let params else { return nil }
+        for (key, result) in scoped {
+            let parts = key.split(separator: "\u{1F}", maxSplits: 1).map(String.init)
+            guard parts.count == 2, params[parts[0]]?.stringValue == parts[1] else { continue }
+            return result
+        }
+        return nil
+    }
 
     func setError(_ error: RPCError, for method: String) { errors[method] = error }
 
@@ -76,6 +96,10 @@ actor FakeGateway {
         if silent.contains(method) { return }
         if let error = errors[method] {
             respond(to: id, error: error)
+            return
+        }
+        if let scoped = scopedResult(method: method, params: frame["params"]) {
+            respond(to: id, result: scoped)
             return
         }
         let result = results[method] ?? Self.defaultResult(method: method,
@@ -202,6 +226,18 @@ actor FakeGateway {
         switch method {
         case "client.capabilities":
             return capabilitiesResult
+        case "profiles.list":
+            // Shape measured on the deployed gateway: a `profiles` array, plus fields the client
+            // must ignore. Entries name themselves `name`; nothing else is guaranteed.
+            return .object([
+                "profiles": .array([
+                    .object(["name": .string("default"), "is_default": .bool(true)]),
+                    .object(["name": .string("cody")]),
+                    .object(["name": .string("jason")]),
+                ]),
+                "bot_mode_protocol": .int(1),
+                "install_id": .string("probe-install"),
+            ])
         case "session.list":
             return .object(["sessions": .array([
                 .object(["id": .string("stored-1"), "title": .string("First"), "preview": .string("hi"),

@@ -29,8 +29,15 @@ final class UnpairedGatewayClient: GatewayClientProtocol, @unchecked Sendable {
     func connect() async throws { throw Reason.noHost }
     func disconnect() async {}
 
+    /// No host, so there is no profile directory to list. Throwing leaves `bots` empty,
+    /// which is what the unpaired rail shows ("No host paired") — it never dials out.
+    func listBots() async throws -> [Bot] { throw Reason.noHost }
+
     func ping() async throws { throw Reason.noHost }
     func listSessions(limit: Int) async throws -> [SessionSummary] { throw Reason.noHost }
+    func listSessions(limit: Int, profile: String?, includeHidden: Bool) async throws -> [SessionSummary] {
+        throw Reason.noHost
+    }
     func resumeSession(_ id: SessionID) async throws -> SessionResume { throw Reason.noHost }
     func createSession(model: String?, provider: String?) async throws -> SessionID { throw Reason.noHost }
     func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry] { throw Reason.noHost }

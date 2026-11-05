@@ -170,7 +170,7 @@ struct ConversationScreen: View {
             Hairline(color: Tokens.border)
 
             Composer(text: $model.draft,
-                     placeholder: "Message Hermes",
+                     placeholder: "Message \(app.selectedBotName)",
                      isSending: model.isBusy,
                      onSend: { Task { await model.send() } },
                      onAttach: { notice = "Attachments arrive with the file-handling milestone." },

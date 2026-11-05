@@ -67,9 +67,12 @@ struct SessionSidebarView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Text("Hermes")
+            Text(store.botTitle)
                 .font(TypeScale.font(15, weight: .semibold))
                 .foregroundStyle(Tokens.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(store.botTitle)
 
             if model.sessionsLoading {
                 SpinningRing(color: Tokens.textDim, size: 9, lineWidth: 1.4)
@@ -99,28 +102,49 @@ struct SessionSidebarView: View {
     private var list: some View {
         if !store.isPaired {
             unpairedState
+        } else if model.sessions.isEmpty && model.bots.isEmpty {
+            if model.botsLoading {
+                discoveringBotsState
+            } else if let error = model.botsError {
+                botsErrorState(error)
+            } else if model.connection.isLive {
+                noBotsState
+            } else {
+                emptyState
+            }
+        } else if model.selectedBotID == nil && !model.bots.isEmpty {
+            // A bot list with nothing chosen: the rail is the way out, not a spinner.
+            noBotSelectedState
         } else if model.sessions.isEmpty {
-            emptyState
+            if model.sessionsLoading {
+                loadingSessionsState
+            } else {
+                emptyState
+            }
         } else if sections.isEmpty {
             noMatchesState
         } else {
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(sections) { section in
-                        SectionCaption(section.title)
-                            .padding(.horizontal, 14)
-                            .padding(.top, 12)
-                            .padding(.bottom, 3)
+            sessionList
+        }
+    }
 
-                        ForEach(section.sessions) { session in
-                            row(for: session)
-                        }
+    private var sessionList: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(alignment: .leading, spacing: 2) {
+                ForEach(sections) { section in
+                    SectionCaption(section.title)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 12)
+                        .padding(.bottom, 3)
+
+                    ForEach(section.sessions) { session in
+                        row(for: session)
                     }
-
-                    Color.clear.frame(height: 8)
                 }
-                .padding(.horizontal, 6)
+
+                Color.clear.frame(height: 8)
             }
+            .padding(.horizontal, 6)
         }
     }
 
@@ -197,27 +221,128 @@ struct SessionSidebarView: View {
 
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
-            SectionCaption(store.connectAttempted ? "NO SESSIONS" : "NOT LOADED")
+            SectionCaption(model.connection.isLive ? "NO SESSIONS" : "NOT LOADED")
                 .padding(.horizontal, 14)
-            Text(store.connectAttempted
-                 ? "The host answered, but has no sessions yet. Start one."
+            Text(model.connection.isLive
+                 ? "\(store.botTitle) has no sessions yet. Start one."
                  : "Connect to \(store.pairing?.displayHost ?? model.hostName) to list its conversations.")
                 .font(TypeScale.font(Tokens.textSM))
                 .foregroundStyle(Tokens.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 14)
-            OpenBotButton(store.connectAttempted ? "New session" : "Connect",
-                          systemImage: store.connectAttempted ? "square.and.pencil" : "bolt.horizontal",
+            OpenBotButton(model.connection.isLive ? "New session" : "Connect",
+                          systemImage: model.connection.isLive ? "square.and.pencil" : "bolt.horizontal",
                           kind: .secondary,
                           size: .small,
-                          isDisabled: store.connectAttempted && !model.connection.isLive) {
-                if store.connectAttempted {
+                          isDisabled: !model.connection.isLive) {
+                if model.connection.isLive {
                     store.newSession()
                 } else {
                     Task { await store.connect() }
                 }
             }
             .padding(.horizontal, 14)
+        }
+        .padding(.top, 4)
+    }
+
+    /// The host answered `profiles.list` and named no bots. This is a state the user can
+    /// act on, not a failure to retry forever, so it says what happened and offers one
+    /// refresh rather than a spinner.
+    private var noBotsState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionCaption("NO BOTS")
+                .padding(.horizontal, 14)
+            Text("No bots found on this host.")
+                .font(TypeScale.font(Tokens.textSM, weight: .medium))
+                .foregroundStyle(Tokens.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
+            Text("The gateway answered, but listed no profiles. Check that this host has a Hermes bot to talk to, then check again.")
+                .font(TypeScale.font(Tokens.textSM))
+                .foregroundStyle(Tokens.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
+            OpenBotButton("Check again",
+                          systemImage: "arrow.clockwise",
+                          kind: .secondary,
+                          size: .small) {
+                Task { await store.loadBots() }
+            }
+            .padding(.horizontal, 14)
+        }
+        .padding(.top, 4)
+    }
+
+    /// `profiles.list` failed and there are no rows to fall back to (an older host that
+    /// also answers no sessions). Say which call failed and what it said, plus one retry.
+    private func botsErrorState(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionCaption("BOTS UNAVAILABLE")
+                .padding(.horizontal, 14)
+            Text("Could not list this host's bots.")
+                .font(TypeScale.font(Tokens.textSM, weight: .medium))
+                .foregroundStyle(Tokens.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
+            Text(message)
+                .font(TypeScale.font(Tokens.textSM))
+                .foregroundStyle(Tokens.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
+            OpenBotButton("Try again",
+                          systemImage: "arrow.clockwise",
+                          kind: .secondary,
+                          size: .small,
+                          isDisabled: !model.connection.isLive) {
+                Task { await store.loadBots() }
+            }
+            .padding(.horizontal, 14)
+        }
+        .padding(.top, 4)
+    }
+
+    /// A bot switch clears the list before the new one arrives. Say that, rather than
+    /// telling the user the bot has no sessions while the answer is still in flight.
+    private var loadingSessionsState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionCaption("LOADING SESSIONS")
+                .padding(.horizontal, 14)
+            HStack(spacing: 8) {
+                SpinningRing(color: Tokens.textDim, size: 10, lineWidth: 1.4)
+                Text("Reading \(store.botTitle)'s conversations…")
+                    .font(TypeScale.font(Tokens.textSM))
+                    .foregroundStyle(Tokens.textMuted)
+            }
+            .padding(.horizontal, 14)
+        }
+        .padding(.top, 4)
+    }
+
+    private var discoveringBotsState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionCaption("FINDING BOTS")
+                .padding(.horizontal, 14)
+            HStack(spacing: 8) {
+                SpinningRing(color: Tokens.textDim, size: 10, lineWidth: 1.4)
+                Text("Asking the host which bots it serves…")
+                    .font(TypeScale.font(Tokens.textSM))
+                    .foregroundStyle(Tokens.textMuted)
+            }
+            .padding(.horizontal, 14)
+        }
+        .padding(.top, 4)
+    }
+
+    private var noBotSelectedState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionCaption("NO BOT SELECTED")
+                .padding(.horizontal, 14)
+            Text("Pick a bot in the rail to see its conversations.")
+                .font(TypeScale.font(Tokens.textSM))
+                .foregroundStyle(Tokens.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
         }
         .padding(.top, 4)
     }
@@ -260,8 +385,23 @@ private struct CompactSessionSidebarPreview: View {
     }
 }
 
+private struct BotWithoutSessionsPreview: View {
+    @StateObject private var store = PreviewWorkspace.store(.empty)
+
+    var body: some View {
+        SessionSidebarView(model: store.model, store: store)
+            .frame(width: Geometry.sidebarDefault, height: 640)
+            .task { await store.attachPreviewHost() }
+            .preferredColorScheme(.dark)
+    }
+}
+
 #Preview("Session sidebar") {
     SessionSidebarPreview()
+}
+
+#Preview("Session sidebar · bot with no sessions") {
+    BotWithoutSessionsPreview()
 }
 
 #Preview("Session sidebar · collapsed") {

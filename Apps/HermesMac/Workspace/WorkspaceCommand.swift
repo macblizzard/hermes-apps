@@ -11,6 +11,7 @@ struct WorkspaceCommand: Identifiable {
         case go = "Go"
         case host = "Host"
         case view = "View"
+        case bot = "Bots"
     }
 
     let id: String

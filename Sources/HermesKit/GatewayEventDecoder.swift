@@ -198,6 +198,47 @@ enum GatewayPayloadDecoder {
         }
     }
 
+    /// `profiles.list` — the bot directory.
+    ///
+    /// Measured body: `{"profiles":[{"name":"default"}, …], "bot_mode_protocol":…, "install_id":…}`.
+    /// Only the names are contractual, so an entry may also be a bare string or name the field
+    /// `profile`; anything else is ignored rather than failing the whole list, and a body without
+    /// a `profiles` array is a malformed reply (a silent `[]` would read as "no bots on this host").
+    static func bots(_ result: JSONValue?) throws -> [Bot] {
+        guard let rows = result?["profiles"]?.arrayValue else {
+            throw GatewayError.malformedResponse(method: "profiles.list")
+        }
+        var seen = Set<String>()
+        var bots: [Bot] = []
+        for row in rows {
+            guard let bot = bot(row), seen.insert(bot.id).inserted else { continue }
+            bots.append(bot)
+        }
+        return bots
+    }
+
+    static func bot(_ value: JSONValue) -> Bot? {
+        switch value {
+        case .string(let name):
+            guard let name = Bot.trimmed(name) else { return nil }
+            return Bot(id: name)
+        case .object(let object):
+            guard let name = profileName(object) else { return nil }
+            // A display label is a nicety: the profile name is what the switcher falls back to.
+            let display = object["display_name"]?.stringValue ?? object["label"]?.stringValue
+            return Bot(id: name, name: name, displayName: display)
+        default:
+            return nil
+        }
+    }
+
+    private static func profileName(_ object: [String: JSONValue]) -> String? {
+        for key in ["name", "profile", "id", "slug"] {
+            if let name = Bot.trimmed(object[key]?.stringValue) { return name }
+        }
+        return nil
+    }
+
     static func sessionSummaries(_ result: JSONValue?) throws -> [SessionSummary] {
         guard let rows = result?["sessions"]?.arrayValue else {
             throw GatewayError.malformedResponse(method: "session.list")

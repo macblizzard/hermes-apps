@@ -4,17 +4,23 @@ import SwiftUI
 
 /// The 72 pt icon rail (`Geometry.serverRailMacOS`).
 ///
-/// Only four of these are places in this build. The rest are drawn disabled with a reason in
-/// their tooltip rather than hidden: a rail whose icons appear over time is harder to learn
-/// than one that says what is coming.
+/// The top block is the bots column (`BotRail`): in Hermes the host is not one assistant,
+/// it is an address book, so the rail's first job is switching between them. The marks
+/// under it are places in this build. The disabled ones are drawn with a reason in their
+/// tooltip rather than hidden: a rail whose icons appear over time is harder to learn than
+/// one that says what is coming.
 struct IconRail: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
 
     var body: some View {
         VStack(spacing: 5) {
-            logo
-                .padding(.bottom, 10)
+            BotRail(model: model, store: store)
+                .frame(maxHeight: .infinity, alignment: .top)
+
+            Hairline()
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
 
             railButton(symbol: "bubble.left.and.bubble.right",
                        label: "Conversations",
@@ -40,8 +46,6 @@ struct IconRail: View {
                        isEnabled: false,
                        action: {})
 
-            Spacer(minLength: 0)
-
             railButton(symbol: "link",
                        label: "Pair host…",
                        isActive: store.isPairSheetPresented,
@@ -65,23 +69,6 @@ struct IconRail: View {
         if model.hasPendingRequests { return .needsYou }
         if model.connection.isLive { return .running }
         return .idle
-    }
-
-    /// The mark: the host's initial in a raised tile, the same shape as the app icon.
-    private var logo: some View {
-        RoundedRectangle(cornerRadius: 11, style: .continuous)
-            .fill(Tokens.surfaceRaised)
-            .frame(width: 34, height: 34)
-            .overlay(
-                Text("H")
-                    .font(TypeScale.font(13, weight: .bold))
-                    .foregroundStyle(Tokens.textSecondary)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
-                    .strokeBorder(Tokens.borderStrong, lineWidth: 1)
-            )
-            .accessibilityLabel("Hermes")
     }
 
     private func railButton(symbol: String,

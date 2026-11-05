@@ -33,7 +33,7 @@ struct ConversationPane: View {
                 }
             }
 
-            if model.selectedSessionID == nil {
+            if openSession == nil {
                 ConversationEmptyState(model: model, store: store)
             } else {
                 TranscriptScroll(model: model)
@@ -44,6 +44,14 @@ struct ConversationPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Tokens.canvas)
+    }
+
+    /// The transcript is only drawn for a session that is in the *current* bot's list.
+    /// A stale id left over from another bot must not paint one bot's messages under
+    /// another bot's header, so "open" means "present in `sessions`", not just non-nil.
+    private var openSession: SessionSummary? {
+        guard let id = model.selectedSessionID else { return nil }
+        return model.sessions.first { $0.id == id }
     }
 
     private var bannerKind: ConnectionBanner.Kind? {
@@ -63,6 +71,11 @@ private struct ConversationEmptyState: View {
     private var title: String {
         if !store.isPaired { return "No host paired" }
         if !model.connection.isLive { return "Not connected" }
+        if model.bots.isEmpty { return "No bots found on this host" }
+        if model.sessionsLoading && model.sessions.isEmpty {
+            return "Loading \(store.botTitle)'s conversations…"
+        }
+        if model.sessions.isEmpty { return "\(store.botTitle) has no sessions yet" }
         return "No conversation selected"
     }
 
@@ -73,14 +86,29 @@ private struct ConversationEmptyState: View {
         if !model.connection.isLive {
             return "Connect to \(store.pairing?.displayHost ?? model.hostName) to load its sessions."
         }
+        if model.bots.isEmpty {
+            return "The gateway answered, but listed no profiles. Check that this host has a Hermes bot to talk to, then check again."
+        }
+        if model.sessionsLoading && model.sessions.isEmpty {
+            return "The host is listing this bot's sessions."
+        }
+        if model.sessions.isEmpty {
+            return "Start one here, or switch bots in the rail."
+        }
         return "Pick a session in the list, or start a new one."
+    }
+
+    private var icon: String {
+        if !store.isPaired { return "link.badge.plus" }
+        if model.connection.isLive && model.bots.isEmpty { return "person.2.slash" }
+        return "bubble.left.and.bubble.right"
     }
 
     var body: some View {
         VStack(spacing: 12) {
             Spacer(minLength: 0)
 
-            Image(systemName: store.isPaired ? "bubble.left.and.bubble.right" : "link.badge.plus")
+            Image(systemName: icon)
                 .font(.system(size: 22, weight: .light))
                 .foregroundStyle(Tokens.textDim)
 
@@ -106,6 +134,10 @@ private struct ConversationEmptyState: View {
                               size: .small,
                               isBusy: model.connection == .connecting) {
                     Task { await store.connect() }
+                }
+            } else if model.bots.isEmpty {
+                OpenBotButton("Check again", systemImage: "arrow.clockwise", kind: .secondary, size: .small) {
+                    Task { await store.loadBots() }
                 }
             } else {
                 OpenBotButton("New session", systemImage: "square.and.pencil", kind: .secondary, size: .small) {

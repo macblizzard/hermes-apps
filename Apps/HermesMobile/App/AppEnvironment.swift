@@ -27,6 +27,11 @@ final class AppEnvironment: ObservableObject {
     @Published private(set) var isPairing = false
     @Published private(set) var pairingError: String?
 
+    // MARK: Bots
+
+    /// The bot switcher sheet on the Chats screen.
+    @Published var isBotSwitcherPresented = false
+
     // MARK: Devices
 
     @Published private(set) var devices: [PairedDevice] = []
@@ -79,6 +84,14 @@ final class AppEnvironment: ObservableObject {
         store.host?.host ?? model.hostName
     }
 
+    /// The bot whose sessions the Chats list is showing.
+    var selectedBot: Bot? { model.selectedBot }
+
+    /// Chrome that has room for one name (the composer placeholder, the sheet's footer).
+    var selectedBotName: String {
+        selectedBot?.displayName ?? model.hostName
+    }
+
     var isPaired: Bool { store.host != nil }
 
     /// What the banner and the pill are allowed to say. An unpaired app is `.idle`, never
@@ -117,6 +130,27 @@ final class AppEnvironment: ObservableObject {
 
     func title(for sessionID: SessionID) -> String {
         model.sessions.first(where: { $0.id == sessionID })?.title ?? "Session"
+    }
+
+    // MARK: - Bots
+
+    /// Re-read the host's bot directory. `AppModel.start()` already does this on connect;
+    /// this is the explicit retry from the switcher and the Chats empty state. The session
+    /// list is re-read too, so a directory change cannot leave another bot's rows on screen.
+    func loadBots() async {
+        await model.loadBots()
+        await model.loadSessions()
+    }
+
+    /// Switch bots from the Chats sheet. `AppModel` owns the re-scope: it re-lists
+    /// sessions for the new profile and drops the old transcript. The composer is not part
+    /// of that reset, so it is emptied here rather than carried onto another bot.
+    func selectBot(_ id: String) {
+        guard id != model.selectedBotID else { return }
+        model.draft = ""
+        Task { [weak self] in
+            await self?.model.selectBot(id)
+        }
     }
 
     // MARK: - Lifecycle
@@ -198,6 +232,7 @@ final class AppEnvironment: ObservableObject {
         devices = []
         devicesError = nil
         modelLabel = nil
+        isBotSwitcherPresented = false
     }
 
     func dismissPairingError() {

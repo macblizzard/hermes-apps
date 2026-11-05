@@ -75,6 +75,51 @@ final class WorkspaceStore: ObservableObject {
 
     var connectionLabel: String { model.connection.label }
 
+    /// The bot whose sessions are on screen. Nil while the list is still empty, which is
+    /// what lets the sidebar say "no bots" rather than borrow a name.
+    var selectedBot: Bot? { model.selectedBot }
+
+    /// The sidebar header. A bot name when one is selected; the host's own name before
+    /// profiles arrive, never a hardcoded product name.
+    var botTitle: String {
+        selectedBot?.displayName ?? model.hostName
+    }
+
+    // MARK: Bots
+
+    /// Re-read the host's bot directory. `AppModel.start()` already does this on connect;
+    /// this exists for the explicit "check again" affordance, which must not reconnect.
+    ///
+    /// The session list is re-read too: if the selected bot disappeared from the directory,
+    /// `loadBots` moves the selection, and the rows on screen would otherwise still belong
+    /// to the bot that is no longer selected.
+    func loadBots() async {
+        await model.loadBots()
+        await model.loadSessions()
+    }
+
+    /// Switch the workspace to another bot: sessions and conversation follow, and the
+    /// first session of the new bot opens so the pane never sits on the old transcript.
+    ///
+    /// The composer is per-session state the model does not clear on a bot switch, so the
+    /// draft is parked under the session it was typed in and the field is emptied. Without
+    /// that, text meant for one bot would sit in the composer addressed to the next one.
+    func selectBot(_ id: String) {
+        guard id != model.selectedBotID else { return }
+        if let current = model.selectedSessionID {
+            drafts[current] = model.draft
+        }
+        model.draft = ""
+        Task { [weak self] in
+            guard let self else { return }
+            await self.model.selectBot(id)
+            if let first = self.model.sessions.first {
+                await self.model.select(first.id)
+                self.model.draft = self.drafts[first.id] ?? ""
+            }
+        }
+    }
+
     // MARK: Lifecycle
 
     /// Attach to the host. Only ever called from an explicit user action — the app makes
@@ -356,6 +401,22 @@ final class WorkspaceStore: ObservableObject {
                 self.setSidebarWidth(self.sidebarIsCompact ? Geometry.sidebarDefault : Geometry.sidebarCompact)
                 self.endSidebarDrag()
             }))
+
+        // The bots are a catalogue of their own: one command per profile, disabled for the
+        // one already on screen, so switching is reachable without leaving the keyboard.
+        for bot in model.bots {
+            items.append(WorkspaceCommand(
+                id: "bot.\(bot.id)",
+                title: "Switch to \(bot.displayName)",
+                subtitle: bot.id == model.selectedBotID
+                    ? "Current bot · \(bot.id)"
+                    : "Bot · \(bot.id)",
+                systemImage: "person.crop.circle",
+                shortcut: nil,
+                group: .bot,
+                isEnabled: bot.id != model.selectedBotID && model.connection.isLive,
+                run: { [weak self] in self?.selectBot(bot.id) }))
+        }
 
         return items
     }

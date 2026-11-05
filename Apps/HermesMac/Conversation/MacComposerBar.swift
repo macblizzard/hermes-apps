@@ -32,7 +32,7 @@ struct MacComposerBar: View {
 
             Composer(text: $model.draft,
                      placeholder: store.isPaired
-                        ? "Ask Hermes anything"
+                        ? "Ask \(store.selectedBot?.displayName ?? model.hostName) anything"
                         : "Pair a host to start a conversation",
                      isSending: model.isStreaming,
                      isDisabled: model.selectedSessionID == nil,
