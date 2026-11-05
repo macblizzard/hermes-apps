@@ -1,5 +1,5 @@
 [Unit]
-Description=Hermes bridge (native clients ↔ local Hermes TUI gateway)
+Description=Hermes bridge (native clients to the loopback gateway)
 Documentation=https://github.com/macblizzard/hermes-apps
 After=network-online.target tailscaled.service
 Wants=network-online.target

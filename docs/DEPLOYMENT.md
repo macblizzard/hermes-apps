@@ -93,3 +93,26 @@ rm -rf /opt/hermes-apps /var/lib/hermes-bridge /etc/hermes-bridge
 ```
 
 Do **not** touch `hermes-gateway.service` while doing this — that is the messaging gateway.
+
+## The rule that caused the second collision
+
+**Hermes allows exactly one machine-level dashboard server per host.** Whichever process binds it
+first owns the slot, and every later `hermes dashboard` refuses to start with
+
+```
+Refusing to start: this host is already served by PID 1256270 (127.0.0.1:9120; profiles: default,
+anika, aria, ...). You asked for --port 9119 (the host owner is on port 9120).
+```
+
+Measured on this host: `hermes-native-gateway` took the slot at 14:26:36; a dashboard start on
+`:9119` was refused at 14:26:50; tailscaled logged `dial tcp 100.86.19.1:9119: connect: connection
+refused` at 14:34:25; a `socat` forwarder (`hermes-dashboard-forward.service`, `:9119 → 127.0.0.1:9120`)
+was installed at 14:34:51 to restore that surface. It works, but it means any other dashboard surface
+now terminates in *this* process — so restarting `hermes-native-gateway` briefly drops it.
+
+Consequences to respect:
+
+- Check `hermes dashboard --status` before starting this gateway on a host someone else uses.
+- Restarting it is a user-visible event for every forwarded dashboard surface — announce it.
+- `--isolated` gives a dedicated server scoped to one profile, freeing the host slot, but the app
+  then loses the all-bots view (`profiles.list` would still answer, sessions would not).

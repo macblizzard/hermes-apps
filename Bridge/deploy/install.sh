@@ -46,10 +46,30 @@ EOF
   echo "  HERMES_DASHBOARD_SESSION_TOKEN=$TOKEN hermes dashboard --port 9120 --host 127.0.0.1"
 fi
 
-install -m 0644 "$BRIDGE_HOME/deploy/hermes-bridge.service" /etc/systemd/system/hermes-bridge.service
+install -m 0644 "$BRIDGE_HOME/deploy/hermes-native-bridge.service" /etc/systemd/system/hermes-native-bridge.service
 systemctl daemon-reload
-systemctl enable --now hermes-bridge.service
-systemctl --no-pager --lines=5 status hermes-bridge.service || true
+systemctl enable --now hermes-native-bridge.service
+systemctl --no-pager --lines=5 status hermes-native-bridge.service || true
+
+cat <<'NOTE'
+
+WARNING -- two collisions that actually happened on a live host:
+
+1) Never write /etc/systemd/system/hermes-gateway.service. That is Hermes' own
+   MESSAGING gateway unit (ExecStart=/root/scripts/hermes-gateway-runtime.sh
+   gateway run). Overwriting it looks harmless -- the running process keeps its
+   in-memory config -- and only surfaces at the next restart, when the messaging
+   gateway does not come back. Our units are named hermes-native-* for this reason.
+
+2) Hermes allows exactly ONE machine-level dashboard server per host. Whichever
+   process binds it first OWNS the slot, and every later `hermes dashboard` on any
+   port refuses to start ("this host is already served by PID ... You asked for
+   --port 9119"). So starting this gateway takes the slot from any dashboard the
+   user already runs. Check first:
+       hermes dashboard --status
+   and if something already owns the host, either stop it deliberately or run yours
+   with --isolated (scoped to one profile, so the app loses the all-bots view).
+NOTE
 
 echo
 echo "Now expose it to the tailnet (TLS from Let's Encrypt via Tailscale, no public port):"
