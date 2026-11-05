@@ -76,7 +76,7 @@ struct StreamingCaret: View {
 // MARK: - Previews
 
 private struct MarkdownTextViewPreview: View {
-    private let body = """
+    private let sample = """
     Snapshotting the **vault** first, then I'll diff the `docs/` tree.
 
     **Plan**
@@ -95,7 +95,7 @@ private struct MarkdownTextViewPreview: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
-                MarkdownTextView(text: body)
+                MarkdownTextView(text: sample)
                 MarkdownTextView(text: "Backup is in place — 1,204 files, no errors.", isStreaming: true)
             }
             .padding(24)

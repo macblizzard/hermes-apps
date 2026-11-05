@@ -1,5 +1,6 @@
 import SwiftUI
 import HermesKit
+import HermesAppKit
 import OpenBotUI
 
 // MARK: - Presentation

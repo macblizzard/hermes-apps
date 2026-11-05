@@ -41,11 +41,14 @@ final class AppEnvironment: ObservableObject {
     private let bridge: BridgeServiceProtocol
     private let box: CredentialBox
 
+    // No default-argument values here on purpose: a default argument is evaluated in a
+    // nonisolated context, and both `HostStore()` and `LiveBridgeService()` are
+    // main-actor-isolated. They are built inside the body instead.
     init(client: GatewayClientProtocol? = nil,
-         store: HostStore = HostStore(),
-         bridge: BridgeServiceProtocol = LiveBridgeService()) {
-        self.store = store
-        self.bridge = bridge
+         store: HostStore? = nil,
+         bridge: BridgeServiceProtocol? = nil) {
+        self.store = store ?? HostStore()
+        self.bridge = bridge ?? LiveBridgeService()
 
         let box = CredentialBox()
         let resolvedClient: GatewayClientProtocol

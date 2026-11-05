@@ -23,34 +23,17 @@ struct ConversationScreen: View {
 
     private var title: String { app.title(for: sessionID) }
 
-    var body: some View {
+
+    /// Split out of `body` on purpose: a ScrollViewReader + ScrollView + LazyVStack + six
+    /// conditionals in one expression exceeded the type-checker's budget
+    /// ("unable to type-check this expression in reasonable time").
+    private var transcriptScroll: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    if model.transcript.isEmpty && !model.isStreaming && model.pendingRequests.isEmpty {
-                        MobileTranscriptEmpty(title: title)
-                    }
-
-                    ForEach(model.transcript) { entry in
-                        MobileTranscriptRow(entry: entry)
-                            .id(entry.id)
-                    }
-
-                    if !model.pendingRequests.isEmpty {
-                        pendingSection
-                    }
-
-                    if model.isStreaming || !model.streamingText.isEmpty {
-                        MobileStreamingBubble(text: model.streamingText)
-                    }
-
-                    Color.clear
-                        .frame(height: 1)
-                        .id(ConversationScreen.bottomID)
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                .padding(.bottom, 20)
+                transcriptList
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 20)
             }
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: model.transcript.count) { _ in
@@ -60,6 +43,35 @@ struct ConversationScreen: View {
                 scroll(proxy, animated: false)
             }
         }
+    }
+
+    private var transcriptList: some View {
+        LazyVStack(alignment: .leading, spacing: 16) {
+            if model.transcript.isEmpty && !model.isStreaming && model.pendingRequests.isEmpty {
+                MobileTranscriptEmpty(title: title)
+            }
+
+            ForEach(model.transcript) { entry in
+                MobileTranscriptRow(entry: entry)
+                    .id(entry.id)
+            }
+
+            if !model.pendingRequests.isEmpty {
+                pendingSection
+            }
+
+            if model.isStreaming || !model.streamingText.isEmpty {
+                MobileStreamingBubble(text: model.streamingText)
+            }
+
+            Color.clear
+                .frame(height: 1)
+                .id(ConversationScreen.bottomID)
+        }
+    }
+
+    var body: some View {
+        transcriptScroll
         .background(Tokens.canvas)
         .safeAreaInset(edge: .bottom, spacing: 0) { composerArea }
         .mobileConnectionBanner(connection: app.visibleConnection,

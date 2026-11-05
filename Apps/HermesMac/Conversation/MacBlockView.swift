@@ -61,7 +61,7 @@ struct MacBlockView: View {
     }
 
     private var text: AttributedString {
-        attributed ?? BlockText.attributed(for: block, metrics: metrics)
+        attributed ?? BlockText.attributed(for: block)
     }
 
     private func codeBlock(language: String?, body: String, closed: Bool) -> some View {
@@ -145,7 +145,7 @@ private struct MacBlockViewPreview: View {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(blocks.indices), id: \.self) { index in
                     MacBlockView(block: blocks[index],
-                                 attributed: BlockText.attributed(for: blocks[index], metrics: metrics),
+                                 attributed: BlockText.attributed(for: blocks[index]),
                                  metrics: metrics)
                 }
             }
