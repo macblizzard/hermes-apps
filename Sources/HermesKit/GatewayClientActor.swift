@@ -168,6 +168,9 @@ public actor GatewayClient: GatewayClientProtocol {
 
     /// The runtime id every session-scoped call needs, and the durable id only `session.resume`
     /// accepts. They are different values on the wire and both have to be remembered.
+    /// The bot this connection is bound to. A stored session id is only resolvable inside its
+    /// profile on a multiplexed gateway, and the reconnect path has no other way to know which.
+    private var boundProfile: String?
     private var attachedRuntimeID: SessionID?
     private var attachedStoredID: SessionID?
     private var lastSnapshot: SessionResume?
@@ -251,7 +254,12 @@ public actor GatewayClient: GatewayClientProtocol {
     }
 
     public func resumeSession(_ id: SessionID) async throws -> SessionResume {
-        let resumed = try await performResume(id)
+        try await resumeSession(id, profile: nil)
+    }
+
+    public func resumeSession(_ id: SessionID, profile: String?) async throws -> SessionResume {
+        if let profile, !profile.isEmpty { boundProfile = profile }
+        let resumed = try await performResume(id, profile: profile ?? boundProfile)
         attach(resumed, announced: false)
         return resumed.resume
     }
@@ -272,6 +280,7 @@ public actor GatewayClient: GatewayClientProtocol {
             throw GatewayError.malformedResponse(method: "session.create")
         }
         let storedID = result?["stored_session_id"]?.stringValue ?? runtimeID
+        if let profile, !profile.isEmpty { boundProfile = profile }
         attachedRuntimeID = runtimeID
         attachedStoredID = storedID
         // Return the **stored** id: every caller treats the result as a session-list identity and
@@ -817,7 +826,7 @@ public actor GatewayClient: GatewayClientProtocol {
         let previousRuntimeID = attachedRuntimeID
         let watermark = previousRuntimeID.flatMap { watermarks[$0] }
 
-        let resumed = try await performResume(storedID)
+        let resumed = try await performResume(storedID, profile: boundProfile)
         // A different runtime id is a different backend process: every question the old one was
         // blocked on died with it, so nothing it asked is still answerable.
         if let previous = previousRuntimeID, previous != resumed.runtimeID {
@@ -859,9 +868,13 @@ public actor GatewayClient: GatewayClientProtocol {
         return try GatewayPayloadDecoder.eventReplay(result)
     }
 
-    private func performResume(_ id: SessionID) async throws -> GatewayPayloadDecoder.Resume {
+    private func performResume(_ id: SessionID, profile: String?) async throws -> GatewayPayloadDecoder.Resume {
+        var params: [String: JSONValue] = ["session_id": .string(id)]
+        // A stored id is only resolvable inside its bot on a multiplexed gateway; omitting this is
+        // "4007 session not found" even for a session the same socket created a second earlier.
+        if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
         let result = try await perform("session.resume",
-                                       params: .object(["session_id": .string(id)]),
+                                       params: .object(params),
                                        timeout: timeouts.sessionResume)
         return try GatewayPayloadDecoder.sessionResume(result, requestedID: id)
     }

@@ -43,6 +43,15 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
     ///     "this bot has no sessions" instead of "this bot exists".
     func listSessions(limit: Int, profile: String?, includeHidden: Bool) async throws -> [SessionSummary]
     func resumeSession(_ id: SessionID) async throws -> SessionResume
+
+    /// Resume inside a named bot.
+    ///
+    /// A multiplexed gateway (every machine-level one is: 15 profiles here) resolves a **stored**
+    /// session id only within an explicit profile. Measured: `session.resume` with the stored id and
+    /// no `profile` answers `4007 session not found` in under a second, while the same call with
+    /// `"profile": "cody"` succeeds — which presented as "the conversation will not open" right after
+    /// creating it. Implementations that have no profile to give fall back to the single-argument form.
+    func resumeSession(_ id: SessionID, profile: String?) async throws -> SessionResume
     func createSession(model: String?, provider: String?) async throws -> SessionID
     /// Create a session **inside one bot**.
     ///
@@ -135,6 +144,13 @@ public struct Bot: Identifiable, Hashable, Sendable {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+public extension GatewayClientProtocol {
+    /// Conformers with no notion of a bot (previews, the unpaired stub, tests) keep the plain call.
+    func resumeSession(_ id: SessionID, profile: String?) async throws -> SessionResume {
+        try await resumeSession(id)
     }
 }
 

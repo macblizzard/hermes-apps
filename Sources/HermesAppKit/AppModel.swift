@@ -312,7 +312,7 @@ public final class AppModel: ObservableObject {
         // it carries the transcript of the thing the user just left.
         let epoch = botEpoch
         do {
-            let resumed = try await client.resumeSession(id)
+            let resumed = try await client.resumeSession(id, profile: selectedBotID)
             guard epoch == botEpoch, selectedSessionID == id else { return }
             transcript = resumed.entries
             pendingRequests = resumed.openRequests
@@ -358,7 +358,7 @@ public final class AppModel: ObservableObject {
             let localText = streamingText
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             guard selectedSessionID == sid else { return }
-            guard let resumed = try? await client.resumeSession(sid) else { return }
+            guard let resumed = try? await client.resumeSession(sid, profile: selectedBotID) else { return }
             guard selectedSessionID == sid else { return }
 
             if resumed.inflight?.streaming == true {
@@ -467,7 +467,7 @@ public final class AppModel: ObservableObject {
         let key = Self.endlessKey(botID)
         if let stored = Self.defaults.string(forKey: key), !stored.isEmpty {
             do {
-                let resumed = try await client.resumeSession(stored)
+                let resumed = try await client.resumeSession(stored, profile: botID)
                 selectedSessionID = stored
                 transcript = resumed.entries
                 pendingRequests = resumed.openRequests

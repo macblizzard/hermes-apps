@@ -98,6 +98,41 @@ final class GatewayClientTests: XCTestCase {
         XCTAssertEqual(EventDigest.completions(log.all), ["Hello"])
     }
 
+    /// A stored session id is only resolvable inside its bot on a multiplexed gateway.
+    ///
+    /// Measured: `session.resume` with a stored id and no `profile` answers `4007 session not found`
+    /// in under a second, while the same call carrying `"profile": "cody"` succeeds. Omitting it is
+    /// what made a freshly created conversation refuse to open.
+    func testResumeCarriesTheProfileWhenTheCallerNamesOne() async throws {
+        let fake = FakeGateway()
+        let client = makeClient(fake)
+        try await client.connect()
+
+        _ = try await client.resumeSession("stored-1", profile: "cody")
+
+        let params = await fake.params(method: "session.resume")
+        XCTAssertEqual(params?["session_id"]?.stringValue, "stored-1")
+        XCTAssertEqual(params?["profile"]?.stringValue, "cody")
+    }
+
+    /// The reconnect path has no caller to take a profile from, so the client remembers the bot.
+    func testReconnectResumeReusesTheBoundProfile() async throws {
+        let first = FakeGateway()
+        let second = FakeGateway()
+        let feeder = TransportFeeder([first.bridge(), second.bridge()])
+        let client = GatewayClient(makeTransport: { try feeder.next() },
+                                   timeouts: .testing,
+                                   reconnect: .init(enabled: true, maxAttempts: 2,
+                                                    initialDelay: 0.01, multiplier: 1, maxDelay: 0.01))
+        try await client.connect()
+        _ = try await client.resumeSession("stored-1", profile: "jason")
+
+        await first.drop("socket died")
+        let resumed = await second.params(method: "session.resume")
+        XCTAssertEqual(resumed?["profile"]?.stringValue, "jason",
+                       "without this the reconnect resume answers 4007 and the conversation dies")
+    }
+
     /// A live turn's events carry **no** session id on the wire — measured: `message.start` is
     /// `{"turn_id"}`, `message.delta` is `{"text","turn_id","segment","offset"}`, `thinking.delta`
     /// is `{"text"}`. One connection is attached to one session, so those events belong to it.
