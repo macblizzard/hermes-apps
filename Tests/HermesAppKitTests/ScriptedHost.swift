@@ -15,13 +15,19 @@ final class ScriptedHost: GatewayClientProtocol, @unchecked Sendable {
     private(set) var submitted: [String] = []
 
     private let continuation: AsyncStream<ClientEvent>.Continuation
-    let events: AsyncStream<ClientEvent>
+    private let scriptedEvents: AsyncStream<ClientEvent>
+    // Lifecycle regressions use the real client's subscription implementation while retaining
+    // this host's deterministic session/catalogue responses. Existing fixtures remain unchanged.
+    private let eventClient: GatewayClientProtocol?
+    var events: AsyncStream<ClientEvent> { eventClient?.events ?? scriptedEvents }
 
-    init(session: SessionID, entries: [TranscriptEntry] = []) {
+    init(session: SessionID, entries: [TranscriptEntry] = [],
+         eventClient: GatewayClientProtocol? = nil) {
         self.session = session
         self.entries = entries
+        self.eventClient = eventClient
         var captured: AsyncStream<ClientEvent>.Continuation!
-        events = AsyncStream { captured = $0 }
+        scriptedEvents = AsyncStream { captured = $0 }
         continuation = captured
     }
 
@@ -32,8 +38,8 @@ final class ScriptedHost: GatewayClientProtocol, @unchecked Sendable {
 
     // MARK: Handshake
 
-    func connect() async throws {}
-    func disconnect() async {}
+    func connect() async throws { try await eventClient?.connect() }
+    func disconnect() async { await eventClient?.disconnect() }
 
     // MARK: Bots
 

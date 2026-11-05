@@ -141,10 +141,11 @@ public actor GatewayClient: GatewayClientProtocol {
     private let timeouts: Timeouts
     private let policy: ReconnectPolicy
     private let stateBox = TransportStateBox()
-    private let continuation: AsyncStream<ClientEvent>.Continuation
+    private nonisolated let eventHub = ClientEventHub()
 
-    /// Consumer-visible events. Nonisolated so `for await` never needs the actor.
-    public nonisolated let events: AsyncStream<ClientEvent>
+    /// Each read registers a fresh, independent, bounded live subscription. Cancelling one
+    /// observer never finishes another subscription or the transport's event pump.
+    public nonisolated var events: AsyncStream<ClientEvent> { eventHub.subscribe() }
 
     // MARK: - Mutable connection state
 
@@ -182,9 +183,6 @@ public actor GatewayClient: GatewayClientProtocol {
         self.makeTransport = makeTransport
         self.timeouts = timeouts
         self.policy = reconnect
-        var captured: AsyncStream<ClientEvent>.Continuation!
-        self.events = AsyncStream<ClientEvent> { captured = $0 }
-        self.continuation = captured
     }
 
     // MARK: - GatewayClientProtocol
@@ -913,7 +911,7 @@ public actor GatewayClient: GatewayClientProtocol {
     }
 
     private func yield(_ event: ClientEvent) {
-        continuation.yield(event)
+        eventHub.yield(event)
     }
 
     private static func rewindError(_ error: GatewayError) -> GatewayError {
