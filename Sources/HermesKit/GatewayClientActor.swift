@@ -5,7 +5,7 @@ import Foundation
 /// Deliberately typed instead of `NSError`-ish: the UI has to distinguish "the backend answered no"
 /// (show the message) from "we never heard back" (offer retry) from "the socket died" (reconnect),
 /// and a rewind that the gateway refused on purpose must be able to ask for confirmation.
-public enum GatewayError: Error, Sendable, Equatable {
+public enum GatewayError: Error, Sendable, Equatable, LocalizedError {
     /// No connection: the socket is down and a reconnect has not finished yet.
     case notConnected
     /// The first frame (`gateway.ready`) never arrived.
@@ -44,6 +44,12 @@ public enum GatewayError: Error, Sendable, Equatable {
         case .cancelled: return "cancelled"
         }
     }
+
+    /// Without this conformance every failure surfaced to the user as the NSError bridge text
+    /// — `The operation couldn't be completed. (HermesKit.GatewayError error 2.)` — which says
+    /// nothing about what the gateway actually answered. `message` already carries the backend's
+    /// own wording, so the UI shows that instead.
+    public var errorDescription: String? { message }
 }
 
 /// The production client.
@@ -263,7 +269,10 @@ public actor GatewayClient: GatewayClientProtocol {
         let storedID = result?["stored_session_id"]?.stringValue ?? runtimeID
         attachedRuntimeID = runtimeID
         attachedStoredID = storedID
-        return runtimeID
+        // Return the **stored** id: every caller treats the result as a session-list identity and
+        // hands it to `session.resume`, which refuses a runtime id (`4007`). Returning the runtime
+        // id here made "new chat" open a session that could not be resumed.
+        return storedID
     }
 
     public func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry] {
@@ -279,20 +288,35 @@ public actor GatewayClient: GatewayClientProtocol {
         // `status` may come back streaming / queued / steered / redirected; all four mean the turn
         // was accepted, so the client does not second-guess the admission policy.
         _ = try await perform("prompt.submit",
-                              params: .object(["session_id": .string(session), "text": .string(text)]),
+                              params: .object(["session_id": .string(addressableID(session)), "text": .string(text)]),
                               timeout: timeouts.call)
     }
 
     public func steer(session: SessionID, text: String) async throws {
         _ = try await perform("session.steer",
-                              params: .object(["session_id": .string(session), "text": .string(text)]),
+                              params: .object(["session_id": .string(addressableID(session)), "text": .string(text)]),
                               timeout: timeouts.call)
     }
 
     public func interrupt(session: SessionID) async throws {
         _ = try await perform("session.interrupt",
-                              params: .object(["session_id": .string(session)]),
+                              params: .object(["session_id": .string(addressableID(session))]),
                               timeout: timeouts.call)
+    }
+
+    /// The id the gateway will accept for the session the caller is holding.
+    ///
+    /// The session list hands out **stored** ids (`20261103_063640_d774e4`), but a live turn is
+    /// addressed by the **runtime** id that `session.resume` / `session.create` returns
+    /// (`4586a350`). Submitting the stored id to a resumed session is refused with
+    /// `4001 session not found` in ~2 ms — measured against the real gateway, and exactly the
+    /// failure the app showed. After a resume both ids are known, so translate here rather than
+    /// making every call site remember which one it has.
+    private func addressableID(_ session: SessionID) -> SessionID {
+        if let stored = attachedStoredID, let runtime = attachedRuntimeID, session == stored {
+            return runtime
+        }
+        return session
     }
 
     /// Rewind + resend, cut at a durable row id.

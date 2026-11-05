@@ -137,6 +137,23 @@ public struct SessionSummary: Identifiable, Hashable, Sendable {
         self.preview = preview
         self.running = running
     }
+
+    /// What a row should render when the host has no title yet.
+    ///
+    /// Measured on this host: 10 of the default bot's 17 sessions are untitled, so a sidebar that
+    /// prints `title` draws a column of question marks and reads as broken. Titles arrive from the
+    /// gateway only once a turn has been summarised, so the honest fallbacks are, in order: the
+    /// first line of the preview, then an explicit "Untitled session".
+    public var displayTitle: String {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedTitle.isEmpty { return trimmedTitle }
+        if let preview {
+            let line = preview.split(separator: "\n").first.map(String.init)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !line.isEmpty { return String(line.prefix(60)) }
+        }
+        return "Untitled session"
+    }
 }
 
 public struct SessionResume: Sendable {

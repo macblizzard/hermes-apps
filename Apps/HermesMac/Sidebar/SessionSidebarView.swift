@@ -155,7 +155,7 @@ struct SessionSidebarView: View {
         return Button {
             store.select(session.id)
         } label: {
-            SessionRow(title: session.title,
+            SessionRow(title: session.displayTitle,
                        preview: session.preview,
                        updatedAt: session.updatedAt,
                        presence: needsYou ? .needsYou : (isRunning ? .running : .idle),
@@ -181,7 +181,7 @@ struct SessionSidebarView: View {
                         Button {
                             store.select(session.id)
                         } label: {
-                            Avatar(session.title,
+                            Avatar(session.displayTitle,
                                    size: .small,
                                    presence: session.running ? .running : .idle)
                                 .padding(4)
@@ -191,8 +191,8 @@ struct SessionSidebarView: View {
                                 )
                         }
                         .buttonStyle(.plain)
-                        .help(session.title)
-                        .accessibilityLabel(session.title)
+                        .help(session.displayTitle)
+                        .accessibilityLabel(session.displayTitle)
                     }
                 }
                 .padding(.top, 4)

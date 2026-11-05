@@ -75,7 +75,7 @@ struct ChatsScreen: View {
 
     private func row(for session: SessionSummary) -> some View {
         NavigationLink(value: session.id) {
-            SessionRow(title: session.title,
+            SessionRow(title: session.displayTitle,
                        preview: session.preview,
                        updatedAt: session.updatedAt,
                        presence: presence(for: session),

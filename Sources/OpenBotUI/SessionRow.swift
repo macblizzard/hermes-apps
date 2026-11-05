@@ -44,7 +44,7 @@ public struct SessionRow: View {
                 isUnread: Bool = false,
                 isSelected: Bool = false,
                 now: Date = Date()) {
-        self.init(title: session.title,
+        self.init(title: session.displayTitle,
                   preview: session.preview,
                   updatedAt: session.updatedAt,
                   presence: needsYou ? .needsYou : (session.running ? .running : .idle),
