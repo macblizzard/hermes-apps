@@ -532,6 +532,18 @@ public actor GatewayClient: GatewayClientProtocol {
         }
     }
 
+    /// The key the replay bookkeeping uses — deliberately **not** the attribution key.
+    ///
+    /// `watermarks` is compared against `session.events.since`, which addresses the session by its
+    /// **runtime** id, so this must stay on the wire identity. Keying it by the stored id silently
+    /// disabled replay: the watermark for the runtime id was never found, `last_seen` went missing,
+    /// and deltas written during a disconnect were never fetched (caught by
+    /// `testMissedDeltasAreReplayedWhenTheEpochMatches`).
+    private func watermarkKey(_ explicit: String?) -> SessionID {
+        if let explicit, !explicit.isEmpty { return explicit }
+        return attachedRuntimeID ?? attributedSession(explicit)
+    }
+
     /// Which session an event belongs to.
     ///
     /// Measured on the wire: the events of a live turn carry **no** session id at all — their
@@ -561,7 +573,7 @@ public actor GatewayClient: GatewayClientProtocol {
         let payload = params["payload"] ?? .null
 
         if let seq = params["seq"]?.intValue {
-            watermarks[session] = Watermark(seq: Int(seq), epoch: replayEpoch)
+            watermarks[watermarkKey(params["session_id"]?.stringValue)] = Watermark(seq: Int(seq), epoch: replayEpoch)
         }
 
         if type == "gateway.ready" {
