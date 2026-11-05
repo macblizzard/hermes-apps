@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from conftest import ROOT, run, scenario_path
+from qa_support import ROOT, run, scenario_path
 from replay_server import ScriptError, parse_script
 from rpc import RpcTimeout, Socket
 

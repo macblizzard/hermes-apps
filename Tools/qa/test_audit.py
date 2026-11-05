@@ -13,7 +13,7 @@ import logging
 
 import pytest
 
-from conftest import run, scenario_path
+from qa_support import run, scenario_path
 from rpc import Socket
 
 CANARY = "canary-prompt-9f3c-never-log-this"

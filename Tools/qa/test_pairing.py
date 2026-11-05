@@ -14,7 +14,7 @@ import sqlite3
 
 import pytest
 
-from conftest import ROOT
+from qa_support import ROOT
 from harness import BridgeUnderTest
 
 

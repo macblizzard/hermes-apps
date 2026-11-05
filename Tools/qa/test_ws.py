@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from conftest import run, scenario_path
+from qa_support import run, scenario_path
 from replay_server import FRAME_CAP_BYTES
 from rpc import Socket, UpgradeRefused, assert_upgrade_refused
 

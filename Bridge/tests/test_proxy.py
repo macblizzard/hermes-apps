@@ -14,7 +14,7 @@ import pytest
 import websockets
 from websockets.exceptions import ConnectionClosedError, InvalidStatus
 
-from conftest import GATEWAY_TOKEN
+from bridge_test_support import GATEWAY_TOKEN
 
 ALLOWED_AUDIT_KEYS = {
     "ts",

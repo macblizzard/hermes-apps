@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import TEST_PUBLIC_KEY
+from bridge_test_support import TEST_PUBLIC_KEY
 from hermes_bridge.app import WS_TICKET_TTL_SECONDS, create_app
 from hermes_bridge.config import BridgeConfig
 from hermes_bridge.registry import DeviceRegistry

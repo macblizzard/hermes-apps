@@ -20,6 +20,7 @@ from hermes_bridge.audit import AuditLog  # noqa: E402
 from hermes_bridge.config import DEFAULT_FRAME_CAP, BridgeConfig  # noqa: E402
 from hermes_bridge.registry import DeviceRegistry  # noqa: E402
 from fake_gateway import FakeGateway  # noqa: E402
+from bridge_test_support import GATEWAY_TOKEN, TEST_PUBLIC_KEY  # noqa: F401
 
 GATEWAY_TOKEN = "gateway-token-9f3c2a-do-not-leak"
 TEST_PUBLIC_KEY = base64.b64encode(b"\x11" * 32).decode("ascii")

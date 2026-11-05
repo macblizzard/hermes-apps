@@ -26,6 +26,7 @@ for _path in (str(ROOT), str(ROOT / "Bridge"), str(QA_DIR)):
 
 from harness import GATEWAY_PATH, BridgeUnderTest  # noqa: E402
 from replay_server import ReplayServer  # noqa: E402
+from qa_support import ROOT, QA_DIR, run, scenario_path  # noqa: F401
 
 
 # --------------------------------------------------------------------------- #
