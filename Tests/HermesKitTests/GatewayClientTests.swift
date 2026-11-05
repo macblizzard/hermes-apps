@@ -128,6 +128,8 @@ final class GatewayClientTests: XCTestCase {
         _ = try await client.resumeSession("stored-1", profile: "jason")
 
         await first.drop("socket died")
+        // The reconnect is asynchronous: wait for the resume to actually arrive on the new socket.
+        _ = await second.waitFor(methods: ["session.resume"])
         let resumed = await second.params(method: "session.resume")
         XCTAssertEqual(resumed?["profile"]?.stringValue, "jason",
                        "without this the reconnect resume answers 4007 and the conversation dies")
