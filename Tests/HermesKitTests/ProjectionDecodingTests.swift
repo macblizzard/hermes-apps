@@ -26,7 +26,7 @@ final class ProjectionDecodingTests: XCTestCase {
          "timestamp":1793912000}
         """)
 
-        let entry = try XCTUnwrap(GatewayEventDecoder.transcript([projected]).first)
+        let entry = try XCTUnwrap(GatewayPayloadDecoder.transcript([projected]).first)
         XCTAssertEqual(entry.role, .tool)
         XCTAssertEqual(entry.id, "tcall_1", "the call id is the row's stable identity")
         XCTAssertEqual(entry.tool?.name, "terminal")
@@ -45,14 +45,14 @@ final class ProjectionDecodingTests: XCTestCase {
          "content":"Applied 1 hunk","tool_call_id":"call_2"}
         """)
 
-        let entry = try XCTUnwrap(GatewayEventDecoder.transcript([projected]).first)
+        let entry = try XCTUnwrap(GatewayPayloadDecoder.transcript([projected]).first)
         XCTAssertEqual(entry.tool?.content, "Applied 1 hunk")
         XCTAssertEqual(entry.tool?.detail, "Applied 1 hunk")
     }
 
     func testMessageRowsCarryNoToolDetail() throws {
         let user = try json(#"{"role":"user","text":"check the uptime"}"#)
-        let entry = try XCTUnwrap(GatewayEventDecoder.transcript([user]).first)
+        let entry = try XCTUnwrap(GatewayPayloadDecoder.transcript([user]).first)
         XCTAssertNil(entry.tool)
         XCTAssertEqual(entry.text, "check the uptime")
     }
