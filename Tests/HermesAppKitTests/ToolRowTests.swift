@@ -58,6 +58,12 @@ final class ToolRowTests: XCTestCase {
         XCTAssertEqual(model.transcript[1].text, "terminal · uptime · 1.2s",
                        "the row must be the projection shape both apps parse back into a card")
         XCTAssertEqual(model.transcript[2].text, "Casa is up 3 days, 20:49.")
+        XCTAssertEqual(model.transcript[1].tool?.name, "terminal",
+                       "the flushed row keeps the tool's identity for the card")
+        XCTAssertEqual(model.transcript[1].tool?.args, "uptime\n",
+                       "the arguments survive the turn, so a tap can still show what ran")
+        XCTAssertEqual(model.transcript[1].tool?.content, "up 3 days",
+                       "and so does the result")
         XCTAssertTrue(model.liveTools.isEmpty, "the live cards moved into the transcript")
         XCTAssertFalse(model.isStreaming)
     }
@@ -96,6 +102,23 @@ final class ToolRowTests: XCTestCase {
         XCTAssertEqual(model.liveTools.map(\.name), ["read_file"])
         XCTAssertEqual(model.transcript.filter { $0.role == .tool }.count, 1,
                        "the finished turn's card stayed where it happened")
+    }
+
+    /// Reasoning is streamed on its own channel and must outlive the answer that ended it.
+    func testReasoningStaysInTheThreadAfterTheAnswer() async throws {
+        let (model, host) = await openModel(entries: [
+            TranscriptEntry(id: "u1", role: .user, text: "check cloudhome"),
+        ])
+
+        host.emit(.thinkingDelta(session: "s1", text: "cloudhome answers over tailscale; read uptime."))
+        await waitUntil { !model.reasoningText.isEmpty }
+
+        host.emit(.messageComplete(session: "s1", text: "up 42 days"))
+        await waitUntil { model.transcript.count == 3 }
+
+        XCTAssertEqual(model.transcript.map(\.role), [.user, .reasoning, .assistant])
+        XCTAssertEqual(model.transcript[1].text, "cloudhome answers over tailscale; read uptime.")
+        XCTAssertTrue(model.reasoningText.isEmpty, "the live bubble is cleared once the row holds it")
     }
 
     /// The row text has to survive `MobileToolRow.parse`; that means a single-token name first.

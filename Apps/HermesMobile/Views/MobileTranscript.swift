@@ -20,6 +20,8 @@ struct MobileTranscriptRow: View {
             assistant
         case .tool:
             toolResult
+        case .reasoning:
+            MobileReasoningBlock(text: entry.text)
         case .system:
             systemNote
         }
@@ -66,8 +68,15 @@ struct MobileTranscriptRow: View {
     /// do) threw away the only identifying word the row has.
     private var toolResult: some View {
         let parsed = MobileToolRow.parse(entry.text)
-        return MobileToolRow(name: parsed.name,
-                             summary: parsed.summary,
+        let detail = entry.tool
+        // A projected row names its tool and ships the arguments (and, for the editing tools, the
+        // result). Falling back to parsing the text line is only for rows that predate that
+        // projection — those drew a card labelled "Tool" with nothing behind it.
+        let name = detail?.name.isEmpty == false ? (detail?.name ?? parsed.name) : parsed.name
+        let summary = entry.tool?.context ?? parsed.summary
+        return MobileToolRow(name: name,
+                             summary: summary,
+                             output: entry.tool?.detail,
                              isRunning: false,
                              durationMS: nil)
     }

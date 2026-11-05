@@ -758,6 +758,13 @@ public final class AppModel: ObservableObject {
             // A completion with no text would otherwise leave a blank bubble beside the streamed
             // one; the deltas already hold the reply.
             let finalText = text.isEmpty ? streamingText : text
+            // Reasoning is a separate stream and used to be wiped here, so a turn's thinking was
+            // visible while it ran and gone the moment the answer landed.
+            if !reasoningText.isEmpty {
+                transcript.append(TranscriptEntry(id: "reasoning-\(UUID().uuidString)",
+                                                  role: .reasoning,
+                                                  text: reasoningText))
+            }
             // The turn's tool cards become transcript rows *before* the answer: appending the
             // assistant message first would push every card underneath the reply it produced,
             // and leaving them in `liveTools` meant the next resume — which answers with the
@@ -857,7 +864,23 @@ public final class AppModel: ObservableObject {
     private func flushLiveTools() {
         guard !liveTools.isEmpty else { return }
         transcript.append(contentsOf: liveTools.map { tool in
-            TranscriptEntry(id: "tool-\(tool.id)", role: .tool, text: Self.toolRowText(tool))
+            // The row keeps the call's arguments *and* its result, so tapping it after the turn can
+            // still show what ran and what came back — the projection's own rows ship the
+            // arguments for the same reason, and nothing else about the call survives the turn.
+            let firstLine = tool.input
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+            let detail = TranscriptEntry.ToolDetail(
+                name: tool.name,
+                context: firstLine.isEmpty ? nil : String(firstLine.prefix(120)),
+                args: tool.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : tool.input,
+                content: tool.output,
+                labels: []
+            )
+            return TranscriptEntry(id: "tool-\(tool.id)",
+                                   role: .tool,
+                                   text: Self.toolRowText(tool),
+                                   tool: detail)
         })
         liveTools = []
     }

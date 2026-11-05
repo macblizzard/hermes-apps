@@ -228,19 +228,72 @@ public struct InflightTurn: Sendable {
 }
 
 public struct TranscriptEntry: Identifiable, Hashable, Sendable {
-    public enum Role: String, Sendable { case user, assistant, tool, system }
+    public enum Role: String, Sendable {
+        case user, assistant, tool, system
+        /// The model's reasoning for the turn. Never sent by the host as a row — the client
+        /// synthesises it when a turn ends, so the reasoning stops vanishing with the answer.
+        case reasoning
+    }
+
+    /// What a `role: "tool"` row carries besides its text.
+    ///
+    /// The host's projection for a tool row is `{role, name, context, args?, labels?, tool_call_id,
+    /// content?}` — there is no `text` at all, and `content` (the result) is only included for the
+    /// editing tools. A decoder that reads `text`/`content` alone therefore renders every one of
+    /// these as a nameless "Tool" card with nothing behind it, which is exactly what it did.
+    public struct ToolDetail: Hashable, Sendable {
+        /// The wire `name`: `terminal`, `read_file`, `patch`.
+        public let name: String
+        /// The host's ~80-character preview of the arguments, for the card's one-line summary.
+        public let context: String?
+        /// The arguments in full (pretty JSON) — the call itself, so it is always worth showing.
+        public let args: String?
+        /// The tool's own result, when this projection included one (edit tools only).
+        public let content: String?
+        /// Display labels the host pre-composed for the call, in its own order.
+        public let labels: [String]
+
+        public init(name: String,
+                    context: String? = nil,
+                    args: String? = nil,
+                    content: String? = nil,
+                    labels: [String] = []) {
+            self.name = name
+            self.context = context
+            self.args = args
+            self.content = content
+            self.labels = labels
+        }
+
+        /// What a tapped card should open: the result when the host sent one, else the call itself.
+        public var detail: String? {
+            if let content, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return content
+            }
+            return args
+        }
+    }
+
     public let id: String
     public let rowID: Int64?
     public let role: Role
     public let text: String
     public let at: Date?
+    /// Present on `role: "tool"` rows that came from the host's projection.
+    public let tool: ToolDetail?
 
-    public init(id: String, rowID: Int64? = nil, role: Role, text: String, at: Date? = nil) {
+    public init(id: String,
+                rowID: Int64? = nil,
+                role: Role,
+                text: String,
+                at: Date? = nil,
+                tool: ToolDetail? = nil) {
         self.id = id
         self.rowID = rowID
         self.role = role
         self.text = text
         self.at = at
+        self.tool = tool
     }
 }
 

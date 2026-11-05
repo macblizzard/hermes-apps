@@ -20,6 +20,8 @@ struct TranscriptRowView: View {
             assistantRow
         case .tool:
             toolRow
+        case .reasoning:
+            reasoningRow
         case .system:
             systemRow
         }
@@ -68,10 +70,19 @@ struct TranscriptRowView: View {
                  startsExpanded: false)
     }
 
-    /// A history tool line is one flat string (`bash · rsync … · 0.8s · exit 0`). The card
-    /// wants the tool's name and its argument separately, so the first `·` is the split.
-    /// Nothing is invented: a line that has no `·` is simply the name.
+    /// A history tool row from the host's projection carries its own `name`, `context` and `args`
+    /// (plus `content` for the editing tools), so the card is built from those. The flat-string
+    /// split below only covers old rows that predate the projection — those rendered as a card
+    /// labelled "tool" with nothing expandable in it.
     private var toolProjection: (name: String, summary: String?, output: String?) {
+        if let tool = entry.tool {
+            let name = tool.name.isEmpty ? "tool" : tool.name
+            return (name, tool.context ?? legacyProjection.summary, tool.detail)
+        }
+        return legacyProjection
+    }
+
+    private var legacyProjection: (name: String, summary: String?, output: String?) {
         let parts = entry.text
             .components(separatedBy: "·")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -79,6 +90,30 @@ struct TranscriptRowView: View {
         guard let name = parts.first else { return ("tool", nil, nil) }
         let rest = parts.dropFirst()
         return (name, rest.isEmpty ? nil : rest.joined(separator: " · "), nil)
+    }
+
+    // MARK: Reasoning
+
+    /// The model's reasoning for a finished turn, kept in the thread.
+    ///
+    /// Recessed and quiet: it explains the answer rather than competing with it, which is why it
+    /// is dim text and not a bubble.
+    private var reasoningRow: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "sparkles")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Tokens.textDim)
+                .padding(.top, 3)
+
+            Text(entry.text)
+                .font(TypeScale.font(TypeScale.label))
+                .foregroundStyle(Tokens.textMuted)
+                .lineSpacing(3)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel("Reasoning: \(entry.text)")
     }
 
     // MARK: System

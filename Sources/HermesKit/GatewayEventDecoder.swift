@@ -51,6 +51,28 @@ enum GatewayJSON {
         guard let seconds = value?.numberValue, seconds > 0 else { return nil }
         return Date(timeIntervalSince1970: seconds)
     }
+
+    /// Arguments as a human reads them: pretty-printed JSON for a structure, the plain string for
+    /// anything scalar. A card's detail pane opens this, so "compact one-liner" is not good enough.
+    static func prettyText(_ value: JSONValue?) -> String? {
+        guard let value else { return nil }
+        switch value {
+        case .null:
+            return nil
+        case .object, .array:
+            guard let compact = try? JSONRPCCodec.encodeToString(value),
+                  let data = compact.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data),
+                  let pretty = try? JSONSerialization.data(withJSONObject: object,
+                                                           options: [.prettyPrinted, .sortedKeys]),
+                  let text = String(data: pretty, encoding: .utf8) else {
+                return try? JSONRPCCodec.encodeToString(value)
+            }
+            return text
+        default:
+            return text(value)
+        }
+    }
 }
 
 // MARK: - Event envelope
@@ -80,6 +102,15 @@ enum GatewayEventDecoder {
             // Measured: `{"text": "..."}` and, repeatedly, `{"text": ""}` as a heartbeat while the
             // model is still deciding. The heartbeat is not content and must not reach a UI that
             // would read an empty chunk as "reasoning finished, clear the bubble".
+            guard let text = payload["text"]?.stringValue, !text.isEmpty else { return [] }
+            return [.thinkingDelta(session: session, text: text)]
+
+        case "reasoning.delta":
+            // The model's actual reasoning stream. `thinking.delta` is *not* it — that channel
+            // carries the gateway's own wait notices and spinner text (`agent_callbacks`
+            // `_agent_thinking_update`), while reasoning arrives on `reasoning.delta`
+            // (`_emit_reasoning_delta`, gated by `display.show_reasoning`, default on). A decoder
+            // that only knew `thinking.delta` showed no reasoning at all, on every turn.
             guard let text = payload["text"]?.stringValue, !text.isEmpty else { return [] }
             return [.thinkingDelta(session: session, text: text)]
 
@@ -255,8 +286,38 @@ enum GatewayPayloadDecoder {
                                    rowID: rowID,
                                    role: role,
                                    text: text,
-                                   at: GatewayJSON.date(message["timestamp"]))
+                                   at: GatewayJSON.date(message["timestamp"]),
+                                   tool: role == .tool ? toolDetail(message) : nil)
         }
+    }
+
+    /// A projected tool row, read from the fields it actually carries.
+    ///
+    /// Measured shape (`session_history._HISTORY_ROLES` branch for `role == "tool"`):
+    /// `{"role":"tool","name":"terminal","context":"uptime","args":{…},"labels":[…],
+    /// "tool_call_id":"…","timestamp":…}` — and `content`, the result, **only** for
+    /// `write_file`/`patch`/`skill_manage`. `text` is absent, so the old text-only decode drew a
+    /// blank "Tool" card for every call in history.
+    static func toolDetail(_ message: JSONValue) -> TranscriptEntry.ToolDetail? {
+        let name = (message["name"]?.stringValue ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = message["context"]?.stringValue.flatMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        let args = message["args"].flatMap(GatewayJSON.prettyText)
+        let content = GatewayJSON.text(message["content"])
+        let labels = message["labels"]?.arrayValue?.compactMap { label -> String? in
+            // `as_payload()` is `{text:, kind:}` on some builds and a bare string on others.
+            if let text = label["text"]?.stringValue { return text }
+            return label.stringValue
+        } ?? []
+        guard !name.isEmpty || context != nil || args != nil || content != nil else { return nil }
+        return TranscriptEntry.ToolDetail(name: name,
+                                          context: context,
+                                          args: args,
+                                          content: content,
+                                          labels: labels)
     }
 
     /// `profiles.list` — the bot directory.
