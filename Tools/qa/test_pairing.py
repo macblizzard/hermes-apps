@@ -83,9 +83,12 @@ def test_pairing_code_is_single_use(bridge_factory):
 def test_pairing_code_expires(bridge_factory):
     bridge = bridge_factory()
     pairing = bridge.runtime.pairing
-    code, _ = pairing.mint()
+    code, expires = pairing.mint()
     real_clock = pairing._clock
-    pairing._clock = lambda: real_clock() + 121.0
+    # Advance past the code's own expiry rather than a hardcoded 121s: the TTL is configurable
+    # (HERMES_BRIDGE_PAIRING_TTL, default 600s), and a magic number silently stops testing
+    # expiry the moment the default changes.
+    pairing._clock = lambda: expires + 1.0
     try:
         with bridge.http as client:
             response = client.post(
