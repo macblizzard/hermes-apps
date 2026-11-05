@@ -255,7 +255,7 @@ struct MobileApprovalSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .onChange(of: model.pendingRequests.count) { _ in
+        .onChange(of: model.pendingRequests.count) {
             if model.pendingRequests.isEmpty { dismiss() }
         }
     }

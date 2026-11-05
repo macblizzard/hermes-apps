@@ -47,8 +47,10 @@ final class AppEnvironment: ObservableObject {
     init(client: GatewayClientProtocol? = nil,
          store: HostStore? = nil,
          bridge: BridgeServiceProtocol? = nil) {
-        self.store = store ?? HostStore()
-        self.bridge = bridge ?? LiveBridgeService()
+        let store = store ?? HostStore()
+        let bridge = bridge ?? LiveBridgeService()
+        self.store = store
+        self.bridge = bridge
 
         let box = CredentialBox()
         let resolvedClient: GatewayClientProtocol

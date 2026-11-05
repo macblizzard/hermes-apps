@@ -36,10 +36,10 @@ struct ConversationScreen: View {
                     .padding(.bottom, 20)
             }
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: model.transcript.count) { _ in
+            .onChange(of: model.transcript.count) {
                 scroll(proxy, animated: true)
             }
-            .onChange(of: model.streamingText) { _ in
+            .onChange(of: model.streamingText) {
                 scroll(proxy, animated: false)
             }
         }
