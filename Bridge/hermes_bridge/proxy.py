@@ -51,6 +51,10 @@ CLOSE_POLICY = 1008
 CLOSE_TOO_BIG = 1009
 CLOSE_INTERNAL = 1011
 CLOSE_REAUTH = 4401
+#: The server closed this socket because the device was revoked. Distinct from 4401 so the
+#: app can say "this device was removed" instead of "re-pair", and stop retrying.
+CLOSE_DEVICE_REVOKED = 4403
+
 
 #: Reserved id for the bridge's own client.capabilities call.
 BRIDGE_CAPABILITIES_ID = "__hermes_bridge_caps__"
@@ -132,6 +136,44 @@ def split_frames(chunk: bytes, cap: int) -> list[bytes]:
     return frames
 
 
+class LiveSessions:
+    """Open relays, grouped by device.
+
+    A revoked device must stop talking *now*, not when its next ticket expires. The
+    ticket check alone cannot do that: an already-open socket holds a valid upgrade and
+    would keep relaying prompts until the client chose to hang up. So revocation tears
+    the sockets down from this side.
+    """
+
+    def __init__(self) -> None:
+        self._by_device: dict[str, set["GatewayProxy"]] = {}
+        self._lock = asyncio.Lock()
+
+    async def register(self, proxy: "GatewayProxy") -> None:
+        async with self._lock:
+            self._by_device.setdefault(proxy.device_id, set()).add(proxy)
+
+    async def unregister(self, proxy: "GatewayProxy") -> None:
+        async with self._lock:
+            live = self._by_device.get(proxy.device_id)
+            if not live:
+                return
+            live.discard(proxy)
+            if not live:
+                self._by_device.pop(proxy.device_id, None)
+
+    async def close_device(self, device_id: str, reason: str = "device_revoked") -> int:
+        """Close every live relay of one device; returns how many were closed."""
+        async with self._lock:
+            live = list(self._by_device.get(device_id, ()))
+        for proxy in live:
+            await proxy.close_from_server(reason)
+        return len(live)
+
+    def count(self, device_id: str) -> int:
+        return len(self._by_device.get(device_id, ()))
+
+
 class GatewayProxy:
     """One client connection, one upstream connection, two pumps."""
 
@@ -156,6 +198,21 @@ class GatewayProxy:
         self._closed = False
 
     # -- entry point -------------------------------------------------------
+
+    @property
+    def device_id(self) -> str:
+        return self._device_id
+
+    async def close_from_server(self, reason: str) -> None:
+        """Tear this relay down because the server decided so (revocation), not the client."""
+        self._audit.emit(
+            "ws_close",
+            device_id=self._device_id,
+            reason=reason,
+            outcome="closed",
+        )
+        await self._safe_close_client(CLOSE_DEVICE_REVOKED, reason)
+        await self._safe_close_upstream()
 
     async def run(self) -> None:
         self._audit.emit("ws_open", device_id=self._device_id)

@@ -550,7 +550,7 @@ public extension GroupedListRow where Accessory == EmptyView {
     GroupedSection("Host", footer: "Pairing arrives in M2.") {
         GroupedListRow("Hermes host", subtitle: "casa.tailnet.ts.net", detail: "Connected", systemImage: "bolt.fill", iconTint: Tokens.accentText, showsChevron: true)
         GroupedListRow("Protocol", detail: "v3", systemImage: "arrow.left.arrow.right")
-        GroupedListRow("Revoke this device", systemImage: "trash", isDestructive: true, showsSeparator: false)
+        GroupedListRow("Revoke this device", systemImage: "trash", showsSeparator: false, isDestructive: true)
     }
     .padding(16)
     .frame(width: 360)

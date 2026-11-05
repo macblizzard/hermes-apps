@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 from .audit import AuditLog
 from .config import BridgeConfig, is_loopback_host
 from .pairing import InvalidPublicKey, normalize_public_key
-from .proxy import GatewayProxy
+from .proxy import GatewayProxy, LiveSessions
 from .registry import DeviceRegistry
 from .tickets import AttemptThrottle, PairingCodes, TicketStore
 
@@ -87,6 +87,7 @@ class BridgeRuntime:
     pairing: PairingCodes
     tickets: TicketStore
     claims: AttemptThrottle
+    live: LiveSessions
 
 
 def _is_local_host_request(request: Request) -> bool:
@@ -124,6 +125,7 @@ def create_app(
         pairing=PairingCodes(ttl=PAIRING_CODE_TTL_SECONDS),
         tickets=TicketStore(ttl=WS_TICKET_TTL_SECONDS),
         claims=AttemptThrottle(limit=10, window=60.0),
+        live=LiveSessions(),
     )
 
     @asynccontextmanager
@@ -234,12 +236,15 @@ def create_app(
         ]
 
     @app.delete("/v1/devices/{device_id}")
-    def revoke(device_id: str) -> dict:
+    async def revoke(device_id: str) -> dict:
         if runtime.registry.get(device_id) is None:
             raise HTTPException(status_code=404, detail="unknown device")
         runtime.registry.revoke(device_id)
         runtime.tickets.revoke_device(device_id)
-        return {"revoked": device_id}
+        # A revoke that leaves the device's socket open is a promise we cannot keep: the
+        # phone would keep streaming turns until it noticed. Close it from this side.
+        closed = await runtime.live.close_device(device_id)
+        return {"revoked": device_id, "sockets_closed": closed}
 
     @app.websocket("/v1/ws")
     async def ws_proxy(websocket: WebSocket) -> None:
@@ -263,6 +268,11 @@ def create_app(
             return
 
         await websocket.accept()
-        await GatewayProxy(websocket, device_id, cfg, log).run()
+        proxy = GatewayProxy(websocket, device_id, cfg, log)
+        await runtime.live.register(proxy)
+        try:
+            await proxy.run()
+        finally:
+            await runtime.live.unregister(proxy)
 
     return app

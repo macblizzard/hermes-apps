@@ -127,8 +127,8 @@ public struct Composer: View {
     private var baseField: some View {
         TextField("",
                   text: $text,
-                  axis: .vertical,
-                  prompt: Text(placeholder).foregroundColor(Tokens.textPlaceholder))
+                  prompt: Text(placeholder).foregroundColor(Tokens.textPlaceholder),
+                  axis: .vertical)
             .textFieldStyle(.plain)
             .font(TypeScale.font(TypeScale.chatBody))
             .foregroundStyle(Tokens.textPrimary)
@@ -147,7 +147,10 @@ public struct Composer: View {
     private var field: some View {
         #if os(macOS)
         baseField
-            .onKeyPress(.return) { press in
+            // The no-modifier `onKeyPress(_:action:)` overload hands the closure no
+            // `KeyPress`, so it cannot see the Shift modifier. The phases form does.
+            .onKeyPress(phases: .down) { press in
+                guard press.key == .return else { return .ignored }
                 if press.modifiers.contains(.shift) { return .ignored }
                 send()
                 return .handled

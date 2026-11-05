@@ -639,11 +639,6 @@ def test_the_gateway_token_travels_upstream_only(relay_factory):
     assert all(secret not in raw for raw in seen_by_client)
 
 
-@pytest.mark.xfail(
-    reason="design promise (02-architecture.md §6.5) not implemented: revoking a "
-    "device does not drop its live socket; recorded in docs/SECURITY.md, 'gaps'",
-    strict=False,
-)
 def test_revoking_a_device_drops_its_live_socket(relay_factory):
     # A long linger keeps the fake gateway's socket open, so any close observed
     # here can only come from the bridge.
