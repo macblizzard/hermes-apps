@@ -132,9 +132,13 @@ public struct RPCError: Error, Hashable, Sendable, Codable {
 // MARK: - Frames
 
 public struct RPCRequest: Encodable, Sendable {
+    /// Always `"2.0"`. Declared as a stored property so the synthesized encoder writes it —
+    /// the gateway rejects a frame without it, and the first CI run proved that.
+    private let jsonrpc = JSONRPCVersion.string
     public let id: RPCID
     public let method: String
     public let params: JSONValue?
+
 
     public init(id: RPCID, method: String, params: JSONValue? = nil) {
         self.id = id
@@ -145,9 +149,11 @@ public struct RPCRequest: Encodable, Sendable {
 
 /// An answer to a request the *server* sent us.
 public struct RPCResponse: Encodable, Sendable {
+    private let jsonrpc = JSONRPCVersion.string
     public let id: RPCID
     public let result: JSONValue?
     public let error: RPCError?
+
 
     public init(id: RPCID, result: JSONValue? = nil, error: RPCError? = nil) {
         self.id = id
