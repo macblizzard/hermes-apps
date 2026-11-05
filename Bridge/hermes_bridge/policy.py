@@ -32,6 +32,10 @@ CLIENT_METHODS = frozenset(
         "ping",
         "client.capabilities",
         "gateway.capabilities",
+        # bots: a Hermes profile is a bot. The app lists them by name, and scopes
+        # `session.list` with `profile` so one gateway serves every bot.
+        "profiles.list",
+        "profiles.describe",
         # sessions
         "session.list",
         "session.active_list",
