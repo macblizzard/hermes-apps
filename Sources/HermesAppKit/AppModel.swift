@@ -77,9 +77,10 @@ public final class AppModel: ObservableObject {
     /// Tools called during the turn on screen, in the order they started.
     ///
     /// `tool.start` and `tool.complete` are separate events and a turn can be interrupted between
-    /// them, so a start with no matching complete stays `isRunning`. Rows survive
-    /// `message.complete`: the transcript the host sends back holds the turn's *messages*, not its
-    /// tool cards, so clearing here would empty the cards the instant the answer landed.
+    /// them, so a start with no matching complete stays `isRunning`. The cards are only *live*
+    /// state: at the end of the turn they are flushed into `transcript` as `.tool` rows
+    /// (`flushLiveTools`), which is what makes them survive the next resume and keeps them above
+    /// the answer instead of under it.
     @Published public private(set) var liveTools: [LiveTool] = []
 
     public struct LiveTool: Identifiable, Equatable {
@@ -396,10 +397,11 @@ public final class AppModel: ObservableObject {
         lastSendError = nil
         draft = ""
         let optimisticID = UUID().uuidString
+        // An interrupted turn leaves its cards live; they belong to that turn, above this message.
+        flushLiveTools()
         transcript.append(TranscriptEntry(id: optimisticID, role: .user, text: text))
         streamingText = ""
         reasoningText = ""
-        liveTools = []
         compactionNotice = nil
         isStreaming = true
         runningSessions.insert(sid)
@@ -756,6 +758,11 @@ public final class AppModel: ObservableObject {
             // A completion with no text would otherwise leave a blank bubble beside the streamed
             // one; the deltas already hold the reply.
             let finalText = text.isEmpty ? streamingText : text
+            // The turn's tool cards become transcript rows *before* the answer: appending the
+            // assistant message first would push every card underneath the reply it produced,
+            // and leaving them in `liveTools` meant the next resume — which answers with the
+            // host's messages only — wiped them from the thread.
+            flushLiveTools()
             if !finalText.isEmpty {
                 transcript.append(TranscriptEntry(id: UUID().uuidString, role: .assistant, text: finalText))
             }
@@ -831,11 +838,47 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    /// A new turn is starting: the previous turn's tool cards described a turn the transcript now
-    /// holds as messages, so they would otherwise accumulate across turns.
+    /// A new turn is starting: the previous turn's tool cards described a turn whose answer has
+    /// already landed, so they must not run into this one — they become transcript rows first,
+    /// where they stay attached to the turn they belong to.
     private func beginLiveTurn() {
         guard !isStreaming else { return }
+        flushLiveTools()
+    }
+
+    /// Move the turn's live tool cards into `transcript` as `.tool` rows.
+    ///
+    /// While a turn runs the cards are separate state, because `tool.start`/`tool.complete` are
+    /// events and the host sends no message for them. That state is fragile in exactly two ways
+    /// and this call closes both: rows drawn from it render after every transcript entry (so the
+    /// answer appears *above* the calls that produced it) and a resume — the host answers with
+    /// messages, not tool events — would erase them. The row text is the projection format both
+    /// apps already parse back into a card: `name · first line of args · 1.2s`.
+    private func flushLiveTools() {
+        guard !liveTools.isEmpty else { return }
+        transcript.append(contentsOf: liveTools.map { tool in
+            TranscriptEntry(id: "tool-\(tool.id)", role: .tool, text: Self.toolRowText(tool))
+        })
         liveTools = []
+    }
+
+    /// `bash · rsync -a ~/vault/ · 0.8s` — the shape `MobileToolRow.parse` / `TranscriptRowView`
+    /// read back. A call with no arguments still names itself; a call that never completed says
+    /// so rather than claiming a duration it never had.
+    static func toolRowText(_ tool: LiveTool) -> String {
+        var parts = [tool.name.isEmpty ? "unknown tool" : tool.name]
+        let firstLine = (tool.input.split(separator: "\n", omittingEmptySubsequences: true).first
+            .map(String.init) ?? tool.input)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !firstLine.isEmpty { parts.append(String(firstLine.prefix(120))) }
+        if let duration = tool.durationMS {
+            parts.append(duration < 1_000
+                ? "\(max(0, duration)) ms"
+                : String(format: "%.1fs", Double(duration) / 1_000))
+        } else if tool.isRunning {
+            parts.append("interrupted")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
