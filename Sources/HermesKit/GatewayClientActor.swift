@@ -532,12 +532,32 @@ public actor GatewayClient: GatewayClientProtocol {
         }
     }
 
+    /// Which session an event belongs to.
+    ///
+    /// Measured on the wire: the events of a live turn carry **no** session id at all — their
+    /// envelope is `{"type":"message.delta","payload":{"text","turn_id","segment","offset"}}`, and
+    /// `message.start` is `{"turn_id"}`, `thinking.delta` is `{"text"}`. One connection is attached
+    /// to one session, so those events belong to it. Reading `session_id` alone yielded `""`, and a
+    /// UI that filters events by session therefore dropped every delta: the reply streamed past a
+    /// window stuck on "working".
+    ///
+    /// An explicit id is still honoured when present (other surfaces do send one), and it is
+    /// normalized to the *stored* id because that is the identity the session list and the UI use —
+    /// the runtime id is only an address for calls.
+    private func attributedSession(_ explicit: String?) -> SessionID {
+        if let explicit, !explicit.isEmpty {
+            if explicit == attachedRuntimeID, let stored = attachedStoredID { return stored }
+            return explicit
+        }
+        return attachedStoredID ?? ""
+    }
+
     private func handleEvent(_ params: JSONValue) {
         guard let type = params["type"]?.stringValue else {
             yield(.unknown(type: "", payload: params))
             return
         }
-        let session = params["session_id"]?.stringValue ?? ""
+        let session = attributedSession(params["session_id"]?.stringValue)
         let payload = params["payload"] ?? .null
 
         if let seq = params["seq"]?.intValue {

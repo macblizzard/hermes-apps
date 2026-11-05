@@ -98,6 +98,31 @@ final class GatewayClientTests: XCTestCase {
         XCTAssertEqual(EventDigest.completions(log.all), ["Hello"])
     }
 
+    /// A live turn's events carry **no** session id on the wire — measured: `message.start` is
+    /// `{"turn_id"}`, `message.delta` is `{"text","turn_id","segment","offset"}`, `thinking.delta`
+    /// is `{"text"}`. One connection is attached to one session, so those events belong to it.
+    /// Reading `session_id` alone yielded `""`, the UI filtered every delta out, and the window sat
+    /// on "working" while the reply streamed past it.
+    func testTurnEventsWithoutSessionIDAreAttributedToTheAttachedSession() async throws {
+        let fake = FakeGateway()
+        let client = makeClient(fake)
+        let log = EventLog()
+        log.start(client.events)
+        try await client.connect()
+        _ = try await client.resumeSession("stored-1")
+
+        await fake.emit(event: "message.delta", session: "", payload: .object(["text": .string("Still")]))
+
+        let saw = await log.waitUntil { EventDigest.deltas($0) == ["Still"] }
+        XCTAssertTrue(saw)
+        let attributed = log.all.compactMap { event -> String? in
+            if case let .messageDelta(session, _) = event { return session }
+            return nil
+        }
+        XCTAssertEqual(attributed, ["stored-1"],
+                       "the stored id, which is what the session list and the UI compare against")
+    }
+
     /// The exact bug the fixtures exist to prevent: a bare `method:"message.delta"` notification is
     /// not an event on this backend, and treating it as one hides every real delta behind it.
     func testBareMethodNotificationIsNotADelta() async throws {
