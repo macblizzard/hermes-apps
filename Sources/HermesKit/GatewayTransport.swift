@@ -4,8 +4,8 @@ import Foundation
 ///
 /// Wire format: newline-delimited JSON-RPC 2.0 in both directions (see `JSONRPC.swift`).
 /// Scope of this file in M0 is deliberately small — open a socket, decode frames into an
-/// `AsyncStream`, send text. Request/response correlation and reconnect policy are owned
-/// by the protocol-core agent and land on top of this.
+/// `AsyncStream`, send text. Request/response correlation and reconnect policy live in
+/// `GatewayClient`.
 public enum TransportState: Sendable, Equatable {
     case idle
     case connecting
@@ -14,6 +14,13 @@ public enum TransportState: Sendable, Equatable {
     case closed(reason: String)
     case failed(String)
 }
+
+public enum TransportError: Error, Sendable {
+    case notConnected
+    case badURL(String)
+}
+
+#if canImport(Darwin)
 
 public actor GatewayTransport {
     public typealias URLProvider = @Sendable () async throws -> URL
@@ -99,7 +106,47 @@ public actor GatewayTransport {
     }
 }
 
-public enum TransportError: Error, Sendable {
-    case notConnected
-    case badURL(String)
+#else
+
+/// Typecheck-only stand-in for platforms without `URLSessionWebSocketTask`.
+///
+/// The protocol core is pure Foundation and its tests drive a fake transport, so `swift build` on
+/// Linux must still succeed — but there is no socket here. Every connection attempt fails loudly
+/// instead of pretending to have one; the real path is Darwin-only and runs on the macOS runners.
+public actor GatewayTransport {
+    public typealias URLProvider = @Sendable () async throws -> URL
+
+    public enum Event: Sendable {
+        case state(TransportState)
+        case frame(IncomingFrame)
+        case malformed(String)
+    }
+
+    private let continuation: AsyncStream<Event>.Continuation
+    public nonisolated let events: AsyncStream<Event>
+
+    public init(urlProvider: @escaping URLProvider) {
+        var captured: AsyncStream<Event>.Continuation!
+        self.events = AsyncStream<Event> { captured = $0 }
+        self.continuation = captured
+    }
+
+    public func connect() async throws {
+        continuation.yield(.state(.failed("WebSocket transport is not available on this platform")))
+        throw TransportError.notConnected
+    }
+
+    public func send(text: String) async throws {
+        throw TransportError.notConnected
+    }
+
+    public func send<T: Encodable>(_ frame: T) async throws {
+        try await send(text: JSONRPCCodec.encodeToString(frame))
+    }
+
+    public func disconnect(reason: String = "client closed") {
+        continuation.yield(.state(.closed(reason: reason)))
+    }
 }
+
+#endif

@@ -8,6 +8,6 @@ Rules this package must keep, because they are the whole security story:
 * every request is authenticated, size-capped and method-allow-listed
 """
 
-from .app import app, create_app
+from .app import create_app
 
-__all__ = ["app", "create_app"]
+__all__ = ["create_app"]

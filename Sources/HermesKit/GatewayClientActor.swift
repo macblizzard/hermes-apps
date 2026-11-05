@@ -1,0 +1,839 @@
+import Foundation
+
+/// Everything the protocol core can fail with.
+///
+/// Deliberately typed instead of `NSError`-ish: the UI has to distinguish "the backend answered no"
+/// (show the message) from "we never heard back" (offer retry) from "the socket died" (reconnect),
+/// and a rewind that the gateway refused on purpose must be able to ask for confirmation.
+public enum GatewayError: Error, Sendable, Equatable {
+    /// No connection: the socket is down and a reconnect has not finished yet.
+    case notConnected
+    /// The first frame (`gateway.ready`) never arrived.
+    case handshakeTimedOut
+    /// A call got no response frame in time. Never reported as an empty result — a silent
+    /// `session.list` on a cold profile is a timeout, not "you have no sessions"
+    /// (`fixtures/NOTES.md` §4).
+    case timeout(method: String, seconds: TimeInterval)
+    case transportClosed(String)
+    /// A JSON-RPC error frame from the backend (`-32601`, `4009`, `4028`, …).
+    case rpc(RPCError)
+    /// The frame was not shaped like the contractual result for that method.
+    case malformedResponse(method: String)
+    /// `prompt.submit` refused the cut: it would erase the whole transcript (`4028`).
+    case needsEmptyTranscriptConfirmation(String)
+    /// `prompt.submit` refused the cut: it would archive later user turns (`4033`).
+    case needsDeepCutConfirmation(String)
+    case cancelled
+
+    /// The backend's own error, when there was one — for matching Hermes' 4009/4029 family.
+    public var rpcError: RPCError? {
+        if case .rpc(let error) = self { return error }
+        return nil
+    }
+
+    public var message: String {
+        switch self {
+        case .notConnected: return "not connected"
+        case .handshakeTimedOut: return "the gateway did not send gateway.ready"
+        case .timeout(let method, let seconds): return "\(method) timed out after \(Int(seconds))s"
+        case .transportClosed(let reason): return reason
+        case .rpc(let error): return error.message
+        case .malformedResponse(let method): return "\(method) returned an unexpected result"
+        case .needsEmptyTranscriptConfirmation(let message): return message
+        case .needsDeepCutConfirmation(let message): return message
+        case .cancelled: return "cancelled"
+        }
+    }
+}
+
+/// The production client.
+///
+/// One actor owns one connection at a time. It correlates JSON-RPC ids, bounds every call with a
+/// timeout, performs the mandatory `gateway.ready` → `client.capabilities` handshake, unwraps the
+/// `method:"event"` envelope, routes server→client requests (or refuses them with `-32601` so the
+/// agent fails in one round trip), and re-attaches after a drop so no approval card or half-written
+/// turn is lost.
+public actor GatewayClient: GatewayClientProtocol {
+
+    // MARK: - Tuning
+
+    public struct Timeouts: Sendable, Equatable {
+        /// Every ordinary call. `session.list` and `session.resume` can be slow on a cold profile,
+        /// which is why they are separate — 60 s of silence from `session.list` was observed on a
+        /// real gateway, so the ceiling has to be generous but finite.
+        public var call: TimeInterval
+        public var sessionList: TimeInterval
+        public var sessionResume: TimeInterval
+        public var handshake: TimeInterval
+
+        public init(call: TimeInterval = 30,
+                    sessionList: TimeInterval = 120,
+                    sessionResume: TimeInterval = 120,
+                    handshake: TimeInterval = 20) {
+            self.call = call
+            self.sessionList = sessionList
+            self.sessionResume = sessionResume
+            self.handshake = handshake
+        }
+    }
+
+    public struct ReconnectPolicy: Sendable, Equatable {
+        public var enabled: Bool
+        public var maxAttempts: Int
+        public var initialDelay: TimeInterval
+        public var multiplier: Double
+        public var maxDelay: TimeInterval
+
+        public init(enabled: Bool = true,
+                    maxAttempts: Int = 5,
+                    initialDelay: TimeInterval = 0.5,
+                    multiplier: Double = 2,
+                    maxDelay: TimeInterval = 30) {
+            self.enabled = enabled
+            self.maxAttempts = maxAttempts
+            self.initialDelay = initialDelay
+            self.multiplier = multiplier
+            self.maxDelay = maxDelay
+        }
+
+        public static let disabled = ReconnectPolicy(enabled: false, maxAttempts: 0)
+    }
+
+    /// Builds a *fresh* transport per connection. A bridge carries one `AsyncStream`; reusing it
+    /// after a drop delivers nothing, so reconnects must mint a new one (new socket, new URL
+    /// ticket in the real app).
+    public typealias TransportFactory = @Sendable () async throws -> TransportBridge
+
+    /// Server→client request methods this client can surface to the UI. Everything else is answered
+    /// `-32601` immediately — the backend's `server_requests.send` treats an error response as "the
+    /// renderer cannot do this" and the tool fails fast instead of waiting out clarify's 300 s.
+    public static let answerableServerRequests: Set<String> = [
+        "approval", "clarify", "sudo", "secret", "vault.code", "terminal.read",
+    ]
+
+    // MARK: - Identity of a connection
+
+    private struct PendingCall {
+        let method: String
+        let signal: OneShotSignal<JSONValue?>
+    }
+
+    /// Where a session's replay watermark came from. A `seq` is only comparable inside one server
+    /// process, so the epoch travels with it — comparing a stale watermark against a restarted
+    /// backend silently returns nothing (`event_replay.py`).
+    private struct Watermark {
+        let seq: Int
+        let epoch: String?
+    }
+
+    private let makeTransport: TransportFactory
+    private let timeouts: Timeouts
+    private let policy: ReconnectPolicy
+    private let stateBox = TransportStateBox()
+    private let continuation: AsyncStream<ClientEvent>.Continuation
+
+    /// Consumer-visible events. Nonisolated so `for await` never needs the actor.
+    public nonisolated let events: AsyncStream<ClientEvent>
+
+    // MARK: - Mutable connection state
+
+    private var transport: TransportBridge?
+    private var pump: Task<Void, Never>?
+    private var connectionGeneration = 0
+    private var connectTask: Task<Void, Error>?
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectGeneration = 0
+    private var isIntentionalDisconnect = false
+
+    private var sawReady = false
+    private var readySignal: OneShotSignal<Void>?
+    private var replayEpoch: String?
+    private var advertised: Set<String> = []
+
+    private var nextRequestIDSuffix: Int64 = 0
+    private var pending: [RPCID: PendingCall] = [:]
+    private var openServerRequests: [ServerRequestID: ServerRequest] = [:]
+    private var watermarks: [SessionID: Watermark] = [:]
+
+    /// The runtime id every session-scoped call needs, and the durable id only `session.resume`
+    /// accepts. They are different values on the wire and both have to be remembered.
+    private var attachedRuntimeID: SessionID?
+    private var attachedStoredID: SessionID?
+    private var lastSnapshot: SessionResume?
+    private var rewindSurvivors: [SessionID: [Int64?]] = [:]
+
+    public init(makeTransport: @escaping TransportFactory,
+                timeouts: Timeouts = Timeouts(),
+                reconnect: ReconnectPolicy = ReconnectPolicy()) {
+        self.makeTransport = makeTransport
+        self.timeouts = timeouts
+        self.policy = reconnect
+        var captured: AsyncStream<ClientEvent>.Continuation!
+        self.events = AsyncStream<ClientEvent> { captured = $0 }
+        self.continuation = captured
+    }
+
+    // MARK: - GatewayClientProtocol
+
+    /// Readable without `await`: the connection chip polls it, and the protocol's `get async`
+    /// requirement is satisfied by a nonisolated synchronous getter.
+    public nonisolated var state: TransportState { stateBox.current }
+
+    public func connect() async throws {
+        isIntentionalDisconnect = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectGeneration += 1
+        if case .open = stateBox.current, sawReady { return }
+        if let existing = connectTask {
+            try await existing.value
+            return
+        }
+        let task = Task { try await self.performConnect() }
+        connectTask = task
+        defer { connectTask = nil }
+        try await task.value
+    }
+
+    public func disconnect() async {
+        isIntentionalDisconnect = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectGeneration += 1
+        failAllPending(GatewayError.transportClosed("client closed"))
+        failReady(GatewayError.transportClosed("client closed"))
+        await dropConnection(reason: "client closed")
+        setState(.closed(reason: "client closed"))
+    }
+
+    // MARK: Sessions
+
+    public func listSessions(limit: Int) async throws -> [SessionSummary] {
+        let result = try await perform("session.list",
+                                       params: .object(["limit": .int(Int64(limit))]),
+                                       timeout: timeouts.sessionList)
+        return try GatewayPayloadDecoder.sessionSummaries(result)
+    }
+
+    public func resumeSession(_ id: SessionID) async throws -> SessionResume {
+        let resumed = try await performResume(id)
+        attach(resumed, announced: false)
+        return resumed.resume
+    }
+
+    public func createSession(model: String?, provider: String?) async throws -> SessionID {
+        var params: [String: JSONValue] = [:]
+        if let model { params["model"] = .string(model) }
+        if let provider { params["provider"] = .string(provider) }
+        let result = try await perform("session.create", params: .object(params), timeout: timeouts.sessionResume)
+        guard let runtimeID = result?["session_id"]?.stringValue else {
+            throw GatewayError.malformedResponse(method: "session.create")
+        }
+        let storedID = result?["stored_session_id"]?.stringValue ?? runtimeID
+        attachedRuntimeID = runtimeID
+        attachedStoredID = storedID
+        return runtimeID
+    }
+
+    public func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry] {
+        let result = try await perform("session.history",
+                                       params: .object(["session_id": .string(id)]),
+                                       timeout: timeouts.call)
+        return try GatewayPayloadDecoder.history(result, limit: limit)
+    }
+
+    // MARK: Turns
+
+    public func submit(session: SessionID, text: String) async throws {
+        // `status` may come back streaming / queued / steered / redirected; all four mean the turn
+        // was accepted, so the client does not second-guess the admission policy.
+        _ = try await perform("prompt.submit",
+                              params: .object(["session_id": .string(session), "text": .string(text)]),
+                              timeout: timeouts.call)
+    }
+
+    public func steer(session: SessionID, text: String) async throws {
+        _ = try await perform("session.steer",
+                              params: .object(["session_id": .string(session), "text": .string(text)]),
+                              timeout: timeouts.call)
+    }
+
+    public func interrupt(session: SessionID) async throws {
+        _ = try await perform("session.interrupt",
+                              params: .object(["session_id": .string(session)]),
+                              timeout: timeouts.call)
+    }
+
+    /// Rewind + resend, cut at a durable row id.
+    ///
+    /// `truncate_before_row_id` is preferred over the legacy ordinal because a row id cannot drift
+    /// when the transcript is compacted. `confirm_deep_truncate` is sent because pointing at a row
+    /// *is* the confirmation — everything after it goes, which the caller already showed. The empty
+    /// case is deliberately not confirmed here: wiping the whole transcript needs its own explicit
+    /// answer, delivered through the overload below.
+    public func rewind(session: SessionID, toRowID: Int64, then text: String) async throws {
+        try await rewind(session: session, toRowID: toRowID, then: text, confirmingEmptyTranscript: false)
+    }
+
+    /// The same rewind, after the user agreed that the cut erases the entire transcript (`4028`).
+    public func rewind(session: SessionID,
+                       toRowID: Int64,
+                       then text: String,
+                       confirmingEmptyTranscript: Bool) async throws {
+        var params: [String: JSONValue] = [
+            "session_id": .string(session),
+            "text": .string(text),
+            "truncate_before_row_id": .int(toRowID),
+            "confirm_truncate": .bool(true),
+            "confirm_deep_truncate": .bool(true),
+        ]
+        if confirmingEmptyTranscript {
+            params["confirm_empty_truncate"] = .bool(true)
+        }
+        do {
+            let result = try await perform("prompt.submit", params: .object(params), timeout: timeouts.call)
+            // After a cut the gateway re-mints row ids for any survivor it had to rewrite; the UI
+            // holds the old ones in its cached bubbles.
+            if let survivors = result?["survivor_user_row_ids"]?.arrayValue {
+                rewindSurvivors[session] = survivors.map { $0.intValue }
+            }
+        } catch let error as GatewayError {
+            throw Self.rewindError(error)
+        }
+    }
+
+    // MARK: Discovery
+
+    public func modelOptions() async throws -> [ModelOption] {
+        let result = try await perform("model.options", params: .object([:]), timeout: timeouts.call)
+        return try GatewayPayloadDecoder.modelOptions(result)
+    }
+
+    // MARK: Server → client requests
+
+    public func answer(_ request: ServerRequestID, with result: JSONValue) async throws {
+        try await sendResponse(id: request, result: result, error: nil)
+    }
+
+    public func decline(_ request: ServerRequestID, with error: RPCError) async throws {
+        try await sendResponse(id: request, result: nil, error: error)
+    }
+
+    // MARK: - Additions (not in the frozen protocol, safe for the apps to ignore)
+
+    /// The snapshot the automatic reconnect just produced for the attached session.
+    ///
+    /// A reconnecting app cannot call `resumeSession` itself without racing the client, and the
+    /// `ClientEvent` enum has no "resumed" case (the turn's text must not arrive as a fake delta).
+    /// Apps read the inflight bubble and the restored question cards from here.
+    public func reconnectSnapshot() -> SessionResume? { lastSnapshot }
+
+    /// Survivor row ids from the last rewind of *session*, positionally matching the user turns the
+    /// gateway kept; `nil` entries mean "drop the cached id for that turn".
+    public func survivorRowIDs(for session: SessionID) -> [Int64?]? { rewindSurvivors[session] }
+
+    /// Server→client requests still awaiting an answer on this connection.
+    public func pendingServerRequests() -> [ServerRequest] {
+        openServerRequests.values.sorted { $0.id.description < $1.id.description }
+    }
+
+    /// The server→client methods this backend said it may send (`client.capabilities` reply).
+    public func advertisedServerRequestMethods() -> [String] { advertised.sorted() }
+
+    // MARK: - Handshake
+
+    private func performConnect(retrying: Bool = false) async throws {
+        let generation = beginConnection()
+        // A reconnect already told the UI `.reconnecting(attempt:)`; downgrading the chip to plain
+        // `.connecting` mid-retry reads as "we lost it again".
+        if !retrying { setState(.connecting) }
+
+        let bridge: TransportBridge
+        do {
+            bridge = try await makeTransport()
+        } catch {
+            setState(.failed(String(describing: error)))
+            throw GatewayError.transportClosed("could not create transport: \(error)")
+        }
+
+        transport = bridge
+        do {
+            try await bridge.connect()
+        } catch {
+            transport = nil
+            setState(.failed(String(describing: error)))
+            throw GatewayError.transportClosed("connect failed: \(error)")
+        }
+
+        startPump(bridge, generation: generation)
+        do {
+            try await waitForReady(generation: generation)
+            try await advertiseCapabilities()
+        } catch {
+            // A socket that opened and then failed the handshake must not be left half-alive: the
+            // chip would sit on "connecting" while nothing is listening.
+            let message = (error as? GatewayError)?.message ?? String(describing: error)
+            await dropConnection(reason: "handshake failed")
+            setState(.failed(message))
+            throw error
+        }
+        setState(.open)
+    }
+
+    /// `gateway.ready` is always the first frame, so waiting for it is what turns "socket opened"
+    /// into "this is a Hermes gateway". A socket that opens and never speaks is a failure, not a
+    /// slow connection.
+    private func waitForReady(generation: Int) async throws {
+        if sawReady { return }
+        let signal = OneShotSignal<Void>()
+        readySignal = signal
+        let limit = timeouts.handshake
+        let timer = Self.armTimer(seconds: limit) { [weak self] in
+            await self?.expireReady(generation: generation)
+        }
+        defer { timer?.cancel() }
+        do {
+            try await signal.wait()
+        } catch {
+            if readySignal === signal { readySignal = nil }
+            throw error
+        }
+    }
+
+    /// Exactly once per connection, *after* ready. Without it the gateway refuses every
+    /// approval/clarify/sudo it would otherwise send us and the agent waits out its deadline.
+    private func advertiseCapabilities() async throws {
+        do {
+            let result = try await perform("client.capabilities",
+                                           params: .object(["server_requests": .bool(true)]),
+                                           timeout: timeouts.call)
+            advertised = Set((result?["server_requests"]?.arrayValue ?? []).compactMap { $0.stringValue })
+        } catch let error as GatewayError {
+            // An older backend answers -32601 here. That is a version skew, not a dead connection:
+            // keep the session usable and let approvals fail fast on the server.
+            if case .rpc(let rpc) = error, rpc.code == -32601 {
+                advertised = []
+                return
+            }
+            throw error
+        }
+    }
+
+    // MARK: - Frame pump
+
+    private func startPump(_ bridge: TransportBridge, generation: Int) {
+        pump?.cancel()
+        pump = Task.detached(priority: .userInitiated) { [weak self] in
+            for await event in bridge.events {
+                guard let self else { return }
+                let keepGoing = await self.handle(event, generation: generation)
+                if !keepGoing { return }
+            }
+            await self?.streamEnded(generation: generation)
+        }
+    }
+
+    /// Returns `false` when this pump should stop (superseded connection or a lost socket).
+    private func handle(_ event: GatewayTransport.Event, generation: Int) async -> Bool {
+        guard generation == connectionGeneration else { return false }
+        switch event {
+        case .state(let transportState):
+            switch transportState {
+            case .open:
+                // The socket is up; the client does not report `.open` until the handshake is done.
+                return true
+            case .closed(let reason), .failed(let reason):
+                return connectionLost(reason: reason)
+            case .idle, .connecting, .reconnecting:
+                return true
+            }
+        case .frame(let frame):
+            await handle(frame)
+            return generation == connectionGeneration
+        case .malformed(let line):
+            // -32700 is the gateway's own parse-error code; a torn frame is the same class of event.
+            yield(.error(code: -32700, message: "malformed frame: \(line)"))
+            return true
+        }
+    }
+
+    private func handle(_ frame: IncomingFrame) async {
+        switch frame {
+        case .response(let id, let result, let error):
+            if let error {
+                settle(id: id, .failure(GatewayError.rpc(error)))
+            } else {
+                settle(id: id, .success(result))
+            }
+        case .notification(let method, let params):
+            // The envelope: method is always "event" and the real name is inside params.type.
+            if method == "event" {
+                handleEvent(params)
+            } else {
+                yield(.unknown(type: method, payload: params))
+            }
+        case .request(let request):
+            await route(request)
+        }
+    }
+
+    private func handleEvent(_ params: JSONValue) {
+        guard let type = params["type"]?.stringValue else {
+            yield(.unknown(type: "", payload: params))
+            return
+        }
+        let session = params["session_id"]?.stringValue ?? ""
+        let payload = params["payload"] ?? .null
+
+        if let seq = params["seq"]?.intValue {
+            watermarks[session] = Watermark(seq: Int(seq), epoch: replayEpoch)
+        }
+
+        if type == "gateway.ready" {
+            replayEpoch = payload["replay_epoch"]?.stringValue
+            sawReady = true
+            let signal = readySignal
+            readySignal = nil
+            signal?.settle(.success(()))
+            yield(.ready(replayEpoch: replayEpoch))
+            return
+        }
+
+        if type == "request.cancel" {
+            guard let id = RPCID(json: payload["id"]) else {
+                yield(.unknown(type: type, payload: payload))
+                return
+            }
+            openServerRequests.removeValue(forKey: id)
+            yield(.requestCancelled(id: id, reason: payload["reason"]?.stringValue))
+            return
+        }
+
+        if let event = GatewayEventDecoder.event(type: type, session: session, payload: payload) {
+            yield(event)
+        } else {
+            yield(.unknown(type: type, payload: payload))
+        }
+    }
+
+    private func route(_ request: RPCRequest) async {
+        guard Self.answerableServerRequests.contains(request.method) else {
+            // The agent is blocked on this frame right now. Refusing explicitly beats dropping it:
+            // the tool fails in one round trip instead of waiting out its deadline.
+            let refusal = RPCError(code: -32601,
+                                   message: "unknown method: \(request.method) — not available in this client")
+            try? await sendResponse(id: request.id, result: nil, error: refusal)
+            yield(.unknown(type: request.method, payload: request.params ?? .null))
+            return
+        }
+        let serverRequest = ServerRequest(id: request.id, method: request.method, params: request.params ?? .null)
+        openServerRequests[request.id] = serverRequest
+        yield(.request(serverRequest))
+    }
+
+    private func streamEnded(generation: Int) {
+        guard generation == connectionGeneration else { return }
+        _ = connectionLost(reason: "transport stream ended")
+    }
+
+    // MARK: - Calls
+
+    private func perform(_ method: String, params: JSONValue?, timeout: TimeInterval) async throws -> JSONValue? {
+        // A call made while the socket is coming back waits for that attempt instead of failing:
+        // the UI's refresh-on-reconnect would otherwise race the client and surface a spurious
+        // "not connected". The reconnect is bounded by its own policy, so this cannot hang forever.
+        if transport == nil, !isIntentionalDisconnect, let reconnect = reconnectTask {
+            await reconnect.value
+        }
+        guard transport != nil, !isIntentionalDisconnect else { throw GatewayError.notConnected }
+        let id = RPCID.int(nextRequestID())
+        let signal = OneShotSignal<JSONValue?>()
+        pending[id] = PendingCall(method: method, signal: signal)
+        let timer = Self.armTimer(seconds: timeout) { [weak self] in
+            await self?.expire(id: id, method: method, seconds: timeout)
+        }
+        defer { timer?.cancel() }
+
+        // The waiter has to be parked before the frame goes out: the response can arrive while the
+        // send is still suspended, and a signal created afterwards would drop it.
+        async let answer = signal.wait()
+        do {
+            try await send(id: id, method: method, params: params)
+        } catch {
+            pending.removeValue(forKey: id)
+            signal.settle(.failure(error))
+            _ = try? await answer
+            throw error
+        }
+        return try await answer
+    }
+
+    private func send(id: RPCID, method: String, params: JSONValue?) async throws {
+        guard let transport else { throw GatewayError.notConnected }
+        let line = try JSONRPCCodec.encodeToString(RPCRequest(id: id, method: method, params: params))
+        do {
+            try await transport.send(text: line)
+        } catch {
+            throw GatewayError.transportClosed("send failed: \(error)")
+        }
+    }
+
+    private func sendResponse(id: RPCID, result: JSONValue?, error: RPCError?) async throws {
+        guard let transport else { throw GatewayError.notConnected }
+        do {
+            try await transport.send(text: JSONRPCCodec.encodeToString(RPCResponse(id: id, result: result, error: error)))
+        } catch {
+            throw GatewayError.transportClosed("send failed: \(error)")
+        }
+        openServerRequests.removeValue(forKey: id)
+    }
+
+    private func settle(id: RPCID, _ result: Result<JSONValue?, Error>) {
+        guard let call = pending.removeValue(forKey: id) else { return }  // late answer after a timeout
+        call.signal.settle(result)
+    }
+
+    private func expire(id: RPCID, method: String, seconds: TimeInterval) {
+        guard let call = pending.removeValue(forKey: id) else { return }
+        call.signal.settle(.failure(GatewayError.timeout(method: method, seconds: seconds)))
+    }
+
+    private func failAllPending(_ error: Error) {
+        let calls = Array(pending.values)
+        pending.removeAll()
+        for call in calls { call.signal.settle(.failure(error)) }
+    }
+
+    private func failReady(_ error: Error) {
+        let signal = readySignal
+        readySignal = nil
+        signal?.settle(.failure(error))
+    }
+
+    private func expireReady(generation: Int) {
+        guard generation == connectionGeneration, !sawReady else { return }
+        failReady(GatewayError.handshakeTimedOut)
+    }
+
+    private func nextRequestID() -> Int64 {
+        nextRequestIDSuffix += 1
+        return nextRequestIDSuffix
+    }
+
+    // MARK: - Connection lifecycle
+
+    private func beginConnection() -> Int {
+        connectionGeneration += 1
+        pump?.cancel()
+        pump = nil
+        transport = nil
+        sawReady = false
+        failReady(GatewayError.transportClosed("connection replaced"))
+        return connectionGeneration
+    }
+
+    /// Retire the current socket without touching the reconnect policy or the pending set.
+    private func dropConnection(reason: String) async {
+        connectionGeneration += 1
+        pump?.cancel()
+        pump = nil
+        sawReady = false
+        let closing = transport
+        transport = nil
+        await closing?.disconnect(reason: reason)
+    }
+
+    private func connectionLost(reason: String) -> Bool {
+        failReady(GatewayError.transportClosed(reason))
+        failAllPending(GatewayError.transportClosed(reason))
+        transport = nil
+        // `openServerRequests` deliberately survives: the agent is still blocked on those questions,
+        // and the resume after the reconnect reconciles them (delivering the ones this app has not
+        // seen, tearing down the ones the backend no longer waits on).
+
+        guard !isIntentionalDisconnect, policy.enabled else {
+            setState(.closed(reason: reason))
+            return false
+        }
+        scheduleReconnect(after: reason)
+        return false
+    }
+
+    private func scheduleReconnect(after reason: String) {
+        guard reconnectTask == nil else { return }
+        reconnectGeneration += 1
+        let generation = reconnectGeneration
+        reconnectTask = Task { [weak self] in
+            await self?.runReconnect(after: reason, generation: generation)
+        }
+    }
+
+    private func runReconnect(after reason: String, generation: Int) async {
+        // Only the current reconnect clears the slot: a cancelled one finishing late must not wipe
+        // the handle of the attempt that replaced it.
+        defer {
+            if generation == reconnectGeneration { reconnectTask = nil }
+        }
+        var attempt = 0
+        while attempt < policy.maxAttempts {
+            attempt += 1
+            if isIntentionalDisconnect || Task.isCancelled { return }
+            let delay = min(policy.initialDelay * pow(policy.multiplier, Double(attempt - 1)), policy.maxDelay)
+            setState(.reconnecting(attempt: attempt))
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: Self.nanoseconds(delay))
+            }
+            if isIntentionalDisconnect || Task.isCancelled { return }
+            do {
+                try await performConnect(retrying: true)
+                try await restoreAfterReconnect()
+                return
+            } catch {
+                if isIntentionalDisconnect || Task.isCancelled { return }
+            }
+        }
+        let message = "could not reconnect to the gateway (\(reason))"
+        setState(.failed(message))
+    }
+
+    /// Re-attach, then replay the gap.
+    ///
+    /// `session.resume` is not optional here: the gateway routes a session's events to the transport
+    /// it last attached, so a plain reconnect without a resume keeps writing to the dead socket.
+    /// The resume reply is also the only place `inflight` (the turn half-written when we dropped)
+    /// and `open_requests` (questions still blocking the agent) are restated in full.
+    private func restoreAfterReconnect() async throws {
+        guard let storedID = attachedStoredID else { return }
+        let previousRuntimeID = attachedRuntimeID
+        let watermark = previousRuntimeID.flatMap { watermarks[$0] }
+
+        let resumed = try await performResume(storedID)
+        // A different runtime id is a different backend process: every question the old one was
+        // blocked on died with it, so nothing it asked is still answerable.
+        if let previous = previousRuntimeID, previous != resumed.runtimeID {
+            for id in Array(openServerRequests.keys) {
+                openServerRequests.removeValue(forKey: id)
+                yield(.requestCancelled(id: id, reason: "resolved"))
+            }
+        }
+        attach(resumed, announced: true)
+        // Missed deltas, when the backend is the same process (same replay epoch) and the ring has
+        // not truncated. Everything else means "you cannot patch this incrementally" and the app is
+        // told to refetch — a silent, stale transcript is worse than a reload.
+        guard let watermark,
+              let epoch = replayEpoch,
+              watermark.epoch == epoch,
+              previousRuntimeID == resumed.runtimeID else {
+            yield(.sessionUpdated(resumed.runtimeID))
+            return
+        }
+        do {
+            let replay = try await eventReplay(session: resumed.runtimeID, lastSeen: watermark.seq)
+            if replay.truncated || (replay.epoch != epoch && !replay.epoch.isEmpty) {
+                yield(.sessionUpdated(resumed.runtimeID))
+                return
+            }
+            for event in replay.events { handleEvent(event) }
+            watermarks[resumed.runtimeID] = Watermark(seq: replay.latestSeq, epoch: epoch)
+        } catch {
+            yield(.sessionUpdated(resumed.runtimeID))
+            yield(.error(code: nil, message: "event replay failed: \(error)"))
+        }
+    }
+
+    private func eventReplay(session: SessionID, lastSeen: Int) async throws -> GatewayPayloadDecoder.EventReplay {
+        let result = try await perform("session.events.since",
+                                       params: .object(["session_id": .string(session),
+                                                        "last_seen": .int(Int64(lastSeen))]),
+                                       timeout: timeouts.call)
+        return try GatewayPayloadDecoder.eventReplay(result)
+    }
+
+    private func performResume(_ id: SessionID) async throws -> GatewayPayloadDecoder.Resume {
+        let result = try await perform("session.resume",
+                                       params: .object(["session_id": .string(id)]),
+                                       timeout: timeouts.sessionResume)
+        return try GatewayPayloadDecoder.sessionResume(result, requestedID: id)
+    }
+
+    private func attach(_ resumed: GatewayPayloadDecoder.Resume, announced: Bool) {
+        attachedRuntimeID = resumed.runtimeID
+        attachedStoredID = resumed.storedID
+        lastSnapshot = resumed.resume
+        reconcileOpenRequests(resumed.resume.openRequests, announced: announced)
+    }
+
+    /// Bring the client's open-question set in line with an authoritative `open_requests` list.
+    ///
+    /// A question the app already had is not delivered twice (the gateway's own replay re-delivers
+    /// "as if newly arrived", and a reducer that appends blindly would draw two approval cards); a
+    /// question the backend no longer lists was answered or withdrawn while we were away, so the
+    /// card is torn down rather than left waiting on an agent that moved on.
+    private func reconcileOpenRequests(_ requests: [ServerRequest], announced: Bool) {
+        let listed = Set(requests.map(\.id))
+        for request in requests where openServerRequests[request.id] == nil {
+            openServerRequests[request.id] = request
+            if announced { yield(.request(request)) }
+        }
+        let stale = Array(openServerRequests.keys).filter { !listed.contains($0) }
+        for id in stale {
+            openServerRequests.removeValue(forKey: id)
+            if announced { yield(.requestCancelled(id: id, reason: "resolved")) }
+        }
+    }
+
+    // MARK: - Plumbing
+
+    private func setState(_ new: TransportState) {
+        stateBox.set(new)
+        yield(.state(new))
+    }
+
+    private func yield(_ event: ClientEvent) {
+        continuation.yield(event)
+    }
+
+    private static func rewindError(_ error: GatewayError) -> GatewayError {
+        guard case .rpc(let rpc) = error else { return error }
+        switch rpc.code {
+        case 4028: return .needsEmptyTranscriptConfirmation(rpc.message)
+        case 4033: return .needsDeepCutConfirmation(rpc.message)
+        default: return error
+        }
+    }
+
+    private static func nanoseconds(_ seconds: TimeInterval) -> UInt64 {
+        guard seconds > 0, seconds.isFinite else { return 0 }
+        return UInt64(min(seconds * 1_000_000_000, 9_000_000_000_000_000_000))
+    }
+
+    /// Arms a one-shot timer; `nil` when the caller asked for no bound at all.
+    private static func armTimer(seconds: TimeInterval,
+                                 _ body: @escaping @Sendable () async -> Void) -> Task<Void, Never>? {
+        guard seconds > 0, seconds.isFinite else { return nil }
+        let delay = nanoseconds(seconds)
+        return Task.detached {
+            try? await Task.sleep(nanoseconds: delay)
+            guard !Task.isCancelled else { return }
+            await body()
+        }
+    }
+}
+
+#if canImport(Darwin)
+extension GatewayClient {
+    /// The real thing: a WebSocket per connection, a fresh one per reconnect so each gets its own
+    /// single-use ticket from `urlProvider`.
+    ///
+    /// Darwin-only: `URLSessionWebSocketTask` has no Linux counterpart, and the Linux build exists
+    /// to typecheck the protocol core against a fake transport.
+    public static func webSocket(urlProvider: @escaping GatewayTransport.URLProvider,
+                                 session: URLSession = .shared,
+                                 timeouts: Timeouts = Timeouts(),
+                                 reconnect: ReconnectPolicy = ReconnectPolicy()) -> GatewayClient {
+        GatewayClient(makeTransport: {
+            GatewayTransport(urlProvider: urlProvider, session: session).bridge()
+        }, timeouts: timeouts, reconnect: reconnect)
+    }
+}
+#endif

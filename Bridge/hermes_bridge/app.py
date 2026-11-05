@@ -1,49 +1,51 @@
-"""Bridge HTTP surface (M0 skeleton).
+"""Bridge HTTP + WebSocket surface.
 
-Implemented here: health, pairing, device registry, token exchange.
-Owned next by the bridge agent: the `/v1/ws` JSON-RPC proxy and APNs push.
+HTTP: health, pairing, device registry, token exchange.
+WS:   ``/v1/ws?ticket=...`` -- the JSON-RPC relay in :mod:`hermes_bridge.proxy`.
+
+Security posture:
+
+* pairing codes can only be minted by a process actually on the host -- a
+  connection that arrived through ``tailscale serve`` carries proxy headers and
+  is refused, even though its peer address is loopback;
+* a claim is rate limited per source address, because the 8-digit code is the
+  only brute-forceable secret in the system;
+* refresh tokens are stored as SHA-256 only, and a device is checked *again* at
+  ticket redemption and at upgrade, so a revoke takes effect immediately;
+* a WS ticket is single use, 30 s, and bound to the device that asked for it.
+
+The gateway URL and token never appear in a response, an error string or an audit
+record.
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
+import logging
 import os
 import secrets
 import time
-from dataclasses import dataclass, field
-from typing import Dict, Optional
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
+
+from .audit import AuditLog
+from .config import BridgeConfig, is_loopback_host
+from .pairing import InvalidPublicKey, normalize_public_key
+from .proxy import GatewayProxy
+from .registry import DeviceRegistry
+from .tickets import AttemptThrottle, PairingCodes, TicketStore
 
 PAIRING_CODE_TTL_SECONDS = 120
 ACCESS_TOKEN_TTL_SECONDS = 15 * 60
 WS_TICKET_TTL_SECONDS = 30
 PROTOCOL_VERSION = 1
+MAX_DEVICES = 32
 
-
-@dataclass
-class Device:
-    device_id: str
-    name: str
-    platform: str
-    public_key: str
-    refresh_token_hash: str
-    created_at: float
-    last_seen_at: float
-    revoked: bool = False
-
-
-@dataclass
-class BridgeState:
-    devices: Dict[str, Device] = field(default_factory=dict)
-    pairing_codes: Dict[str, float] = field(default_factory=dict)  # code -> expires_at
-    ws_tickets: Dict[str, tuple[float, str]] = field(default_factory=dict)
-
-    def hashed(self, token: str) -> str:
-        return hashlib.sha256(token.encode()).hexdigest()
+_PROXY_HEADERS = ("forwarded", "x-forwarded-for", "x-real-ip", "tailscale-user-login")
 
 
 class PairStartResponse(BaseModel):
@@ -77,50 +79,128 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
-def create_app() -> FastAPI:
-    app = FastAPI(title="hermes-bridge", version="0.1.0")
-    state = BridgeState()
+@dataclass
+class BridgeRuntime:
+    config: BridgeConfig
+    registry: DeviceRegistry
+    audit: AuditLog
+    pairing: PairingCodes
+    tickets: TicketStore
+    claims: AttemptThrottle
+
+
+def _is_local_host_request(request: Request) -> bool:
+    """True only for a direct loopback caller, not a tailscale-serve proxy."""
+    if any(header in request.headers for header in _PROXY_HEADERS):
+        return False
+    client = request.client.host if request.client else ""
+    return is_loopback_host(client)
+
+
+def _client_key(request: Request) -> str:
+    # Proxied requests all look like loopback; the forwarded identity is what
+    # separates them, and it is attacker-controlled only after TLS termination.
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    return (request.client.host if request.client else "unknown")[:64]
+
+
+def create_app(
+    config: Optional[BridgeConfig] = None,
+    *,
+    registry: Optional[DeviceRegistry] = None,
+    audit: Optional[AuditLog] = None,
+) -> FastAPI:
+    cfg = config or BridgeConfig.from_env()
+    cfg.validate()
+
+    reg = registry or DeviceRegistry(cfg.db_path)
+    log = audit or AuditLog(logger=logging.getLogger(cfg.audit_logger_name))
+    runtime = BridgeRuntime(
+        config=cfg,
+        registry=reg,
+        audit=log,
+        pairing=PairingCodes(ttl=PAIRING_CODE_TTL_SECONDS),
+        tickets=TicketStore(ttl=WS_TICKET_TTL_SECONDS),
+        claims=AttemptThrottle(limit=10, window=60.0),
+    )
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        if registry is None:  # only close what this app created
+            reg.close()
+
+    app = FastAPI(title="hermes-bridge", version="0.2.0", lifespan=lifespan)
+    app.state.bridge = runtime
+
+    @app.middleware("http")
+    async def no_store(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/v1/"):
+            response.headers.setdefault("Cache-Control", "no-store")
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        return response
 
     @app.get("/v1/health")
     def health() -> dict:
         return {
             "status": "ok",
             "protocol_version": PROTOCOL_VERSION,
-            "devices": len([d for d in state.devices.values() if not d.revoked]),
+            "devices": runtime.registry.count_active(),
+            "ws": True,
         }
 
     @app.post("/v1/pair/start", response_model=PairStartResponse)
     def pair_start(request: Request) -> PairStartResponse:
-        # Only a caller already on the host (tailnet-authenticated, loopback) may mint a code.
-        client = request.client.host if request.client else ""
-        if client not in {"127.0.0.1", "::1"}:
-            raise HTTPException(status_code=403, detail="pairing codes are minted on the host only")
-        code = f"{secrets.randbelow(10**8):08d}"
-        expires = time.time() + PAIRING_CODE_TTL_SECONDS
-        state.pairing_codes[code] = expires
+        if not _is_local_host_request(request):
+            raise HTTPException(
+                status_code=403,
+                detail="pairing codes are minted on the host only",
+            )
+        code, _expires = runtime.pairing.mint()
         return PairStartResponse(
             code=code,
-            expires_at=expires,
+            expires_at=time.time() + PAIRING_CODE_TTL_SECONDS,
             host=os.environ.get("HERMES_BRIDGE_PUBLIC_HOST", "hermes.corvus-vibes.ts.net"),
             protocol_version=PROTOCOL_VERSION,
         )
 
     @app.post("/v1/pair/claim", response_model=PairClaimResponse)
-    def pair_claim(body: PairClaimRequest) -> PairClaimResponse:
-        expires = state.pairing_codes.pop(body.code, None)
-        if expires is None or expires < time.time():
+    def pair_claim(body: PairClaimRequest, request: Request) -> PairClaimResponse:
+        allowed, retry_after = runtime.claims.check(_client_key(request))
+        if not allowed:
+            log.emit(
+                "client_request_rejected",
+                reason="claim_rate_limited",
+                direction="client_to_gateway",
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="too many pairing attempts",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        if not runtime.pairing.redeem(body.code):
             raise HTTPException(status_code=401, detail="pairing code invalid or expired")
+
+        try:
+            public_key = normalize_public_key(body.public_key)
+        except InvalidPublicKey as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if runtime.registry.count_active() >= MAX_DEVICES:
+            raise HTTPException(status_code=409, detail="device limit reached; revoke one first")
+
         device_id = base64.urlsafe_b64encode(secrets.token_bytes(12)).decode().rstrip("=")
         refresh = secrets.token_urlsafe(32)
-        now = time.time()
-        state.devices[device_id] = Device(
+        runtime.registry.add_device(
             device_id=device_id,
             name=body.device_name,
             platform=body.platform,
-            public_key=body.public_key,
-            refresh_token_hash=state.hashed(refresh),
-            created_at=now,
-            last_seen_at=now,
+            public_key=public_key,
+            refresh_token=refresh,
         )
         return PairClaimResponse(
             device_id=device_id, refresh_token=refresh, protocol_version=PROTOCOL_VERSION
@@ -128,14 +208,11 @@ def create_app() -> FastAPI:
 
     @app.post("/v1/token", response_model=TokenResponse)
     def token(body: TokenRequest) -> TokenResponse:
-        device = state.devices.get(body.device_id)
-        if device is None or device.revoked:
-            raise HTTPException(status_code=401, detail="unknown device")
-        if not hmac.compare_digest(device.refresh_token_hash, state.hashed(body.refresh_token)):
-            raise HTTPException(status_code=401, detail="bad refresh token")
-        ticket = secrets.token_urlsafe(32)
-        state.ws_tickets[ticket] = (time.time() + WS_TICKET_TTL_SECONDS, device.device_id)
-        device.last_seen_at = time.time()
+        device = runtime.registry.verify_refresh(body.device_id, body.refresh_token)
+        if device is None:
+            raise HTTPException(status_code=401, detail="unknown device or bad refresh token")
+        ticket = runtime.tickets.mint(device.device_id)
+        runtime.registry.touch(device.device_id)
         return TokenResponse(
             access_token=secrets.token_urlsafe(32),
             ws_ticket=ticket,
@@ -153,18 +230,39 @@ def create_app() -> FastAPI:
                 "last_seen_at": d.last_seen_at,
                 "revoked": d.revoked,
             }
-            for d in state.devices.values()
+            for d in runtime.registry.list_devices()
         ]
 
     @app.delete("/v1/devices/{device_id}")
     def revoke(device_id: str) -> dict:
-        device = state.devices.get(device_id)
-        if device is None:
+        if runtime.registry.get(device_id) is None:
             raise HTTPException(status_code=404, detail="unknown device")
-        device.revoked = True
+        runtime.registry.revoke(device_id)
+        runtime.tickets.revoke_device(device_id)
         return {"revoked": device_id}
 
+    @app.websocket("/v1/ws")
+    async def ws_proxy(websocket: WebSocket) -> None:
+        ticket = websocket.query_params.get("ticket")
+        if not ticket:
+            authorization = websocket.headers.get("authorization", "")
+            if authorization.lower().startswith("bearer "):
+                ticket = authorization[7:].strip()
+
+        # Redeem before accept: an unauthenticated upgrade never becomes a
+        # socket, and the ticket is gone even if the peer immediately hangs up.
+        device_id = runtime.tickets.redeem(ticket) if ticket else None
+        if not device_id or not runtime.registry.is_active(device_id):
+            log.emit(
+                "ticket_rejected",
+                device_id=device_id,
+                reason="invalid_expired_or_revoked",
+                outcome="denied",
+            )
+            await websocket.close(code=4401)
+            return
+
+        await websocket.accept()
+        await GatewayProxy(websocket, device_id, cfg, log).run()
+
     return app
-
-
-app = create_app()
