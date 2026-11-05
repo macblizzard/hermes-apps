@@ -30,6 +30,9 @@ TINT = "#007CF7"
 CATEGORY = "utilities"
 
 
+MAX_VERSIONS = 3
+
+
 def read_ipa(ipa: Path) -> dict:
     with zipfile.ZipFile(ipa) as z:
         plist_name = next((n for n in z.namelist() if n.endswith("Info.plist")), None)
@@ -91,6 +94,10 @@ def main() -> int:
     app = (existing.get("apps") or [{}])[0]
     versions = [v for v in app.get("versions", []) if v.get("version") != version or v.get("buildVersion") != build]
     versions.insert(0, entry)
+    # Keep the history short and meaningful. Every build now carries its own marketing version
+    # (0.1.<run>), so a long tail is just noise in a sideloading front end that lists entries by
+    # version string.
+    versions = versions[:MAX_VERSIONS]
 
     privacy = {
         "NSCameraUsageDescription": "Scan the pairing code shown by your Hermes host to connect this device.",
