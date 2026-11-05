@@ -36,6 +36,8 @@ targets:
         product: OpenBotUI
       - package: HermesApps
         product: HermesRender
+      - package: HermesApps
+        product: HermesAppKit
     info:
       path: Apps/HermesMac/Info.plist
       properties:
@@ -65,6 +67,8 @@ targets:
         product: OpenBotUI
       - package: HermesApps
         product: HermesRender
+      - package: HermesApps
+        product: HermesAppKit
     info:
       path: Apps/HermesMobile/Info.plist
       properties:
