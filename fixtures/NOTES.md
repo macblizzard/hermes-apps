@@ -68,3 +68,42 @@ all answered immediately. Two lessons:
 `gateway.ready` is written **before** any request is read. A client that sends frames before receiving
 `gateway.ready` is fine (the loop is already reading), but `client.capabilities` must be sent once
 per connection *after* ready, before any prompt that could raise an approval.
+
+---
+
+## 6. The approval contract (from Hermes source, not from a recording)
+
+Source of truth: `tui_gateway/server.py::_approval_request_payload` and `_emit_approval_request`
+(Hermes v0.22.6). See `fixtures/approval.ndjson`. This closes QA finding #5 ("approval payload
+shapes unverified") — the shapes are now read from the code that builds them.
+
+**The frame** (`srq-<12 hex>` is the real id format, not `srq-7`):
+
+```json
+{"jsonrpc":"2.0","id":"srq-9f2c1a4b77e0","method":"approval","params":{
+  "request_id":"apr-73","command":"rsync -a --delete ...","description":"--delete removes 1 file",
+  "choices":["once","session","always","deny"],"allow_session":true,"allow_permanent":true}}
+```
+
+**`choices` is server-computed, ordered, and authoritative.** The builder starts at `["once"]`, appends
+`"session"` unless `smart_denied` or `allow_session is False`, appends `"always"` unless
+`allow_permanent is False`, then always appends `"deny"`. Therefore:
+
+- the client must render one button per entry in `params.choices` — **never a hardcoded
+  Allow once / Always / Deny triple**. A smart-denied command legitimately offers only two choices.
+- the client must not invent labels for choices it does not know; show the raw token.
+
+**The answer** is `{"choice": <one of params.choices>, "all": <bool>}`; `all: true` resolves every
+queued approval of the same shape at once.
+
+**Not answering is not denying.** If the client replies `-32601` (or never replies), Hermes
+*withdraws* the queue entry and tells the agent "the attached client cannot answer approval requests
+(update the Hermes app)". A withdrawal is not consent and not refusal. The UI must therefore keep
+three visually distinct outcomes: **allowed**, **denied**, **withdrawn/expired** — never render a
+withdrawal as a deny.
+
+**`command` and `description` arrive redacted** (`_redact_approval_command`), because a credential-shaped
+value must not echo to a client. Render exactly what you receive; never reconstruct the command from
+the tool call.
+
+**Withdrawal event**: `request.cancel` with `{"id","method","reason"}`.

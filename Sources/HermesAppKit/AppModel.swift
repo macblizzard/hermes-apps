@@ -153,6 +153,79 @@ public final class AppModel: ObservableObject {
         try? await client.interrupt(session: sid)
     }
 
+    // MARK: Sessions (macOS workspace additions)
+
+    /// Start a fresh session on the host and open it.
+    ///
+    /// The list is reloaded *before* selecting so the new row exists in the sidebar by the
+    /// time the conversation pane switches to it.
+    public func newSession(model: String? = nil, provider: String? = nil) async {
+        sessionsLoading = true
+        defer { sessionsLoading = false }
+        do {
+            let created = try await client.createSession(model: model, provider: provider)
+            sessions = try await client.listSessions(limit: 50)
+            await select(created)
+        } catch {
+            lastSendError = "could not start a session: \(error.localizedDescription)"
+        }
+    }
+
+    /// Retry a dropped connection without losing the open session.
+    public func retryConnection() async {
+        let previous = selectedSessionID
+        await start()
+        if let previous, sessions.contains(where: { $0.id == previous }) {
+            await select(previous)
+        }
+    }
+
+    // MARK: Latency
+
+    /// Round-trip time of one real request, for the connection chip.
+    ///
+    /// `GatewayClientProtocol` has no `ping` verb, so the cheapest honest probe is a
+    /// one-row `session.list`. A host that never answers publishes **nothing** — the chip
+    /// keeps its "direct" label without a number instead of inventing one
+    /// (`fixtures/NOTES.md` §4: silence is a timeout, not a result).
+    public func refreshLatency(budget: TimeInterval = 6) async {
+        guard connection.isLive else {
+            latencyMS = nil
+            return
+        }
+        let client = self.client
+        let started = Date()
+        let answered = await withTaskGroup(of: Bool.self) { group -> Bool in
+            group.addTask {
+                _ = try? await client.listSessions(limit: 1)
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(max(0.5, budget) * 1_000_000_000))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        guard answered else { return }
+        latencyMS = max(0, Int(Date().timeIntervalSince(started) * 1000))
+    }
+
+    // MARK: Derived state
+
+    public var selectedSession: SessionSummary? {
+        guard let selectedSessionID else { return nil }
+        return sessions.first { $0.id == selectedSessionID }
+    }
+
+    public var hasPendingRequests: Bool { !pendingRequests.isEmpty }
+
+    /// The turn is live or the submit is still in flight.
+    public var isBusy: Bool { isStreaming || sending }
+
+    public func clearSendError() { lastSendError = nil }
+
     // MARK: Approvals
 
     public func answer(_ request: ServerRequest, choice: String) async {
@@ -168,6 +241,19 @@ public final class AppModel: ObservableObject {
 
     public func decline(_ request: ServerRequest) async {
         try? await client.decline(request.id, with: .methodNotFound)
+        pendingRequests.removeAll { $0.id == request.id }
+    }
+
+    /// Answer an approval in the shape the gateway actually records.
+    ///
+    /// `answer(_:choice:)` is the generic "pick one" door, but an approval result on the
+    /// wire is `{"approved": Bool}` — `Bridge/tests/test_proxy.py` forwards the app's
+    /// result under the gateway's original id unchanged, and the recorded body is
+    /// `{"approved": true}`. Denying is an answer, not a `-32601`: `decline` tells the
+    /// gateway *this client cannot render the request at all*, which makes the tool fail
+    /// fast. A user pressing Deny said something different.
+    public func approve(_ request: ServerRequest, allowed: Bool) async {
+        try? await client.answer(request.id, with: .object(["approved": .bool(allowed)]))
         pendingRequests.removeAll { $0.id == request.id }
     }
 
@@ -225,30 +311,123 @@ public final class AppModel: ObservableObject {
 // MARK: - Previews
 
 /// A client that answers nothing, so SwiftUI previews and CI snapshots never touch a network.
+///
+/// The `scenario` only changes *what the canned stream says*: every case is offline, the
+/// same sessions are returned, and no case opens a socket. A preview that needs a pending
+/// approval or a half-streamed answer therefore gets it from the event stream — the same
+/// path the real client uses — rather than by poking `AppModel`'s state from outside.
 public final class PreviewGatewayClient: GatewayClientProtocol, @unchecked Sendable {
+    public enum Scenario: String, Sendable {
+        /// Sessions and a resume, nothing live.
+        case sessions
+        /// No sessions at all — the first-launch / unpaired sidebar.
+        case empty
+        /// A turn that is still streaming when the preview settles.
+        case streaming
+        /// A turn blocked on an approval.
+        case approval
+        /// A wire that keeps dropping.
+        case offline
+    }
+
     public var state: TransportState { get async { .open } }
 
     public let events: AsyncStream<ClientEvent>
+    private let continuation: AsyncStream<ClientEvent>.Continuation
+    private let scenario: Scenario
 
-    public init() {
-        var continuation: AsyncStream<ClientEvent>.Continuation!
-        events = AsyncStream { continuation = $0 }
+    public init(scenario: Scenario = .sessions) {
+        self.scenario = scenario
+        var captured: AsyncStream<ClientEvent>.Continuation!
+        events = AsyncStream { captured = $0 }
+        continuation = captured
+    }
+
+    public func connect() async throws {
         continuation.yield(.ready(replayEpoch: nil))
+
+        // Anything that must land *after* the shell has opened a session is deferred: a
+        // delta for a session that is not selected yet is dropped by `AppModel`, which is
+        // the correct behaviour and would make these previews look inert.
+        let continuation = self.continuation
+        switch scenario {
+        case .offline:
+            continuation.yield(.state(.reconnecting(attempt: 2)))
+        case .streaming:
+            Task {
+                for chunk in ["Snapshotting the vault first, ",
+                              "then I'll diff the docs tree.\n\n",
+                              "```sh\nrsync -a --delete ~/vault/ ~/backup/vault/\n```"] {
+                    try? await Task.sleep(nanoseconds: 450_000_000)
+                    continuation.yield(.messageDelta(session: "preview-1", text: chunk))
+                }
+            }
+        case .approval:
+            Task {
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                continuation.yield(.request(ServerRequest(
+                    id: .string("srq-7"),
+                    method: "approval",
+                    params: .object([
+                        "kind": .string("shell"),
+                        "prompt": .string("rm -rf ~/jobs/hermes-apps/.build"),
+                        "reason": .string("Clears the stale build cache before a clean build. The source tree is untouched."),
+                        "session": .string("preview-1"),
+                    ])
+                )))
+            }
+        case .sessions, .empty:
+            break
+        }
     }
 
-    public func connect() async throws {}
     public func disconnect() async {}
+
     public func listSessions(limit: Int) async throws -> [SessionSummary] {
-        [SessionSummary(id: "preview-1", title: "Vault backup + docs sync", preview: "Streaming · 42s", running: true),
-         SessionSummary(id: "preview-2", title: "Tailscale ACL audit", preview: "Reviewed 3 tags · no drift")]
+        guard scenario != .empty else { return [] }
+        return PreviewGatewayClient.sessions
     }
+
+    /// Deterministic, so two preview renderings of the same scenario are the same picture.
+    static let sessions: [SessionSummary] = {
+        let now = Date()
+        return [
+            SessionSummary(id: "preview-1",
+                           title: "Vault backup + docs sync",
+                           updatedAt: now.addingTimeInterval(-42),
+                           preview: "Snapshotting the vault first",
+                           running: true),
+            SessionSummary(id: "preview-2",
+                           title: "Tailscale ACL audit",
+                           updatedAt: now.addingTimeInterval(-3 * 3_600),
+                           preview: "Reviewed 3 tags · no drift"),
+            SessionSummary(id: "preview-3",
+                           title: "Gateway handshake retry",
+                           updatedAt: now.addingTimeInterval(-30 * 3_600),
+                           preview: "The ticket is only valid once"),
+            SessionSummary(id: "preview-4",
+                           title: "Sparse routing notes",
+                           updatedAt: now.addingTimeInterval(-5 * 86_400),
+                           preview: "Draft is in Obsidian under research/"),
+        ]
+    }()
+
     public func resumeSession(_ id: SessionID) async throws -> SessionResume {
         SessionResume(id: id,
-                      entries: [TranscriptEntry(id: "1", role: .user, text: "Back up the vault and re-sync docs."),
-                                TranscriptEntry(id: "2", role: .assistant, text: "Snapshotting the vault first, then I'll diff the docs tree.")],
+                      entries: [
+                        TranscriptEntry(id: "1", role: .user,
+                                        text: "Back up the vault and re-sync docs."),
+                        TranscriptEntry(id: "2", role: .assistant,
+                                        text: "Snapshotting the vault first, then I'll diff the docs tree.\n\n**Plan**\n\n1. `rsync` the vault to `~/backup/vault`\n2. Diff `docs/` against the backup\n3. Report only files that changed\n\n> Nothing is deleted until the diff is reviewed."),
+                        TranscriptEntry(id: "3", role: .tool,
+                                        text: "bash · rsync -a ~/vault/ ~/backup/vault/ · 0.8s · exit 0"),
+                        TranscriptEntry(id: "4", role: .assistant,
+                                        text: "Backup is in place — 1,204 files, no errors. Diffing next."),
+                      ],
                       inflight: nil,
                       openRequests: [])
     }
+
     public func createSession(model: String?, provider: String?) async throws -> SessionID { "preview-new" }
     public func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry] { [] }
     public func submit(session: SessionID, text: String) async throws {}

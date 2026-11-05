@@ -1,170 +1,99 @@
-import SwiftUI
+import HermesAppKit
 import OpenBotUI
+import SwiftUI
 
-/// macOS shell. The three-pane geometry comes straight from OpenBot's
-/// `layout-constants.ts`: 72 px rail, 280 px sidebar (drag 128…400), conversation
-/// with a 640 px measure, 236 px context panel.
+/// macOS workspace. Rail 72, session list 280 (drag 64…400, collapses under 110 to the
+/// 88 pt strip), conversation on a 640 pt measure, context panel 236 — the geometry in
+/// `Geometry`, which mirrors OpenBot's `layout-constants.ts`.
 ///
-/// This file is the shell only — panes are placeholders until App agents land.
+/// Launch is offline by construction: `WorkspaceStore` restores the pairing it was given
+/// last time but dials nothing, and the only calls into `connect()` are the Connect button,
+/// the palette's verb and the pair sheet's Pair press.
 @main
 struct HermesMacApp: App {
-    @State private var sidebarWidth: CGFloat = Geometry.sidebarDefault
+    @StateObject private var store = WorkspaceStore()
 
     var body: some Scene {
-        WindowGroup {
-            WorkspaceShell(sidebarWidth: $sidebarWidth)
+        WindowGroup("Hermes") {
+            WorkspaceRoot(store: store)
                 .frame(minWidth: Geometry.serverRailMacOS + Geometry.sidebarMin + Geometry.conversationMin,
-                       minHeight: 520)
-                .background(Tokens.frame)
+                       minHeight: 560)
                 .preferredColorScheme(.dark)
         }
         .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1320, height: 840)
         .commands {
-            CommandGroup(replacing: .newItem) {}
+            WorkspaceCommands(store: store)
         }
     }
 }
 
-struct WorkspaceShell: View {
-    @Binding var sidebarWidth: CGFloat
-    @State private var showContext = true
+/// The menu bar: everything the palette offers that also deserves a key.
+///
+/// Kept as a plain reference rather than an observed object — menu items read the store when
+/// they are chosen (the closure), which is the only moment that has to be right.
+struct WorkspaceCommands: Commands {
+    let store: WorkspaceStore
 
-    var body: some View {
-        HStack(spacing: 0) {
-            IconRail()
-            Divider().overlay(Tokens.border)
-            SessionSidebar(width: $sidebarWidth)
-                .frame(width: sidebarWidth)
-            Divider().overlay(Tokens.border)
-            ConversationPlaceholder()
-            if showContext {
-                Divider().overlay(Tokens.border)
-                ContextPanel()
-                    .frame(width: Geometry.contextPanel)
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Session") {
+                store.newSession()
             }
+            .keyboardShortcut("n", modifiers: .command)
+            .disabled(!store.model.connection.isLive)
+
+            Button("Pair Host…") {
+                store.isPairSheetPresented = true
+            }
+            .keyboardShortcut("p", modifiers: [.command, .shift])
         }
-        .background(Tokens.canvas)
-    }
-}
 
-struct IconRail: View {
-    private let items = ["bubble.left", "person.2", "doc", "clock", "slider.horizontal.3"]
-    @State private var selection = 0
-
-    var body: some View {
-        VStack(spacing: 6) {
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(Tokens.surfaceRaised)
-                .frame(width: 36, height: 36)
-                .overlay(Text("H").font(.system(size: 13, weight: .bold)).foregroundStyle(Tokens.textSecondary))
-                .padding(.bottom, 8)
-            ForEach(items.indices, id: \.self) { index in
-                Button { selection = index } label: {
-                    Image(systemName: items[index])
-                        .font(.system(size: 15, weight: .regular))
-                        .foregroundStyle(selection == index ? Tokens.textPrimary : Tokens.textDim)
-                        .frame(width: 38, height: 38)
-                        .background(selection == index ? Tokens.controlActive : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-                }
-                .buttonStyle(.plain)
+        CommandMenu("Session") {
+            Button("Send Message") {
+                store.send()
             }
-            Spacer()
-        }
-        .padding(.vertical, 12)
-        .frame(width: Geometry.serverRailMacOS)
-        .background(Tokens.sidebar)
-    }
-}
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(!store.canSend)
 
-struct SessionSidebar: View {
-    @Binding var width: CGFloat
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Hermes").font(.system(size: 15, weight: .semibold)).foregroundStyle(Tokens.textPrimary)
-                Text("cody")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Tokens.accentText)
-                    .padding(.horizontal, 7).padding(.vertical, 2)
-                    .background(Tokens.accentSoft)
-                    .clipShape(Capsule())
-                Spacer()
+            Button("Interrupt Turn") {
+                store.interrupt()
             }
-            .padding(.horizontal, 14).padding(.top, 16).padding(.bottom, 10)
+            .keyboardShortcut(".", modifiers: .command)
+            .disabled(!store.canInterrupt)
 
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").font(.system(size: 11))
-                Text("Search sessions").font(.system(size: Tokens.textSM))
-                Spacer()
+            Divider()
+
+            Button("Reload Sessions") {
+                store.reloadSessions()
             }
-            .foregroundStyle(Tokens.textDim)
-            .padding(.horizontal, 9)
-            .frame(height: 32)
-            .background(Tokens.control)
-            .clipShape(RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous))
-            .padding(.horizontal, 12).padding(.bottom, 12)
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(!store.model.connection.isLive)
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("NO SESSIONS YET")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Tokens.textDim)
-                    .padding(.horizontal, 14)
-                Text("Pair this Mac with your Hermes host to load sessions.")
-                    .font(.system(size: Tokens.textSM))
-                    .foregroundStyle(Tokens.textMuted)
-                    .padding(.horizontal, 14)
-            }
-            Spacer()
-
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("hermes").font(.system(size: 11)).foregroundStyle(Tokens.textMuted)
-                    Spacer()
-                    Text("offline").font(.system(size: 10)).foregroundStyle(Tokens.textDim)
-                }
-                Rectangle().fill(Color.white.opacity(0.08)).frame(height: 3)
-                    .overlay(alignment: .leading) {
-                        Rectangle().fill(Tokens.accent).frame(width: 0, height: 3)
+            Button(store.model.connection.isLive ? "Disconnect" : "Connect") {
+                Task {
+                    if store.model.connection.isLive {
+                        await store.disconnect()
+                    } else {
+                        await store.connect()
                     }
-                    .clipShape(Capsule())
+                }
             }
-            .padding(10)
-            .background(Tokens.control)
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-            .padding(8)
-        }
-        .background(Tokens.sidebar)
-    }
-}
+            .disabled(!store.isPaired)
 
-struct ConversationPlaceholder: View {
-    var body: some View {
-        VStack(spacing: 10) {
-            Spacer()
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 22))
-                .foregroundStyle(Tokens.textDim)
-            Text("No conversation selected").font(.system(size: Tokens.textLG)).foregroundStyle(Tokens.textMuted)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Tokens.canvas)
-    }
-}
+            Divider()
 
-struct ContextPanel: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("CONTEXT")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(Tokens.textDim)
-            Text("Files and skills appear here.").font(.system(size: 11.5)).foregroundStyle(Tokens.textDim)
-            Spacer()
+            Button("Command Palette…") {
+                store.openPalette()
+            }
+            .keyboardShortcut("k", modifiers: .command)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Tokens.sidebar)
+
+        CommandGroup(after: .toolbar) {
+            Button(store.showsContextPanel ? "Hide Context Panel" : "Show Context Panel") {
+                store.toggleContextPanel()
+            }
+            .keyboardShortcut("\\", modifiers: .command)
+        }
     }
 }

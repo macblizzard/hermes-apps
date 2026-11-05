@@ -1,100 +1,95 @@
 import SwiftUI
+import HermesKit
+import HermesAppKit
 import OpenBotUI
 
-/// iOS shell. Native chrome only — `NavigationStack`, `.searchable`, `TabView`,
-/// `.toolbar` — because that is where the platform's smoothness lives (interactive
-/// pop, rubber-band scroll, keyboard avoidance, Liquid Glass on system bars).
+/// iOS shell.
+///
+/// Native chrome only — `TabView`, `NavigationStack`, `.searchable`, `.toolbar`, `.sheet`,
+/// `.safeAreaInset` — because the platform's smoothness lives there: interactive pop,
+/// rubber-band scrolling, keyboard avoidance and the system tab bar. Nothing here draws a
+/// fake navigation bar or imitation glass.
 @main
 struct HermesMobileApp: App {
+    @StateObject private var app = AppEnvironment()
+
     var body: some Scene {
         WindowGroup {
             RootTabView()
+                .environmentObject(app)
                 .preferredColorScheme(.dark)
                 .tint(Tokens.accent)
+                .task { await app.start() }
         }
     }
 }
 
 struct RootTabView: View {
+    @EnvironmentObject private var app: AppEnvironment
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
         TabView {
-            NavigationStack { ChatsScreen() }
+            ChatsTab(model: app.model)
                 .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
 
-            NavigationStack { RoutinesScreen() }
-                .tabItem { Label("Routines", systemImage: "clock") }
-
-            NavigationStack { SettingsScreen() }
+            SettingsTab(model: app.model)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
-    }
-}
-
-struct ChatsScreen: View {
-    @State private var query = ""
-
-    var body: some View {
-        List {
-            Section {
-                EmptyChatsRow()
-            } footer: {
-                Text("Pair with your Hermes host to load sessions.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Tokens.textDim)
-            }
+        .sheet(isPresented: $app.isPairingPresented) {
+            PairingSheet()
         }
-        .scrollContentBackground(.hidden)
-        .background(Tokens.canvas)
-        .navigationTitle("Chats")
-        .searchable(text: $query, prompt: "Search")
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Image(systemName: "person.crop.circle").foregroundStyle(Tokens.textMuted)
-            }
+        .onChange(of: scenePhase) { phase in
+            // A phone comes back from the background with a dead socket; reconnect once
+            // rather than waiting for the user to shake it.
+            guard phase == .active,
+                  app.isPaired,
+                  !app.model.connection.isLive else { return }
+            Task { await app.reconnect() }
         }
     }
 }
 
-struct EmptyChatsRow: View {
+/// The Chats tab owns its own navigation path so switching tabs keeps the pushed
+/// conversation where the user left it.
+struct ChatsTab: View {
+    @ObservedObject var model: AppModel
+    @State private var path = NavigationPath()
+
     var body: some View {
-        HStack(spacing: 11) {
-            Circle()
-                .fill(Tokens.surfaceRaised)
-                .frame(width: 44, height: 44)
-                .overlay(Text("H").font(.system(size: 15, weight: .bold)).foregroundStyle(Tokens.textSecondary))
-            VStack(alignment: .leading, spacing: 3) {
-                Text("No sessions").font(.system(size: 15, weight: .semibold)).foregroundStyle(Tokens.textPrimary)
-                Text("Nothing paired yet").font(.system(size: 13)).foregroundStyle(Tokens.textMuted)
-            }
-            Spacer()
+        NavigationStack(path: $path) {
+            ChatsScreen(model: model, onOpenSession: { path.append($0) })
+                .navigationDestination(for: SessionID.self) { id in
+                    ConversationScreen(model: model, sessionID: id)
+                }
         }
-        .listRowBackground(Tokens.sheet)
+        .badge(model.pendingRequests.count)
     }
 }
 
-struct RoutinesScreen: View {
+struct SettingsTab: View {
+    @ObservedObject var model: AppModel
+
     var body: some View {
-        List {
-            Text("No routines yet").foregroundStyle(Tokens.textMuted)
+        NavigationStack {
+            SettingsScreen(model: model)
         }
-        .scrollContentBackground(.hidden)
-        .background(Tokens.canvas)
-        .navigationTitle("Routines")
     }
 }
 
-struct SettingsScreen: View {
-    var body: some View {
-        Form {
-            Section("Host") {
-                LabeledContent("Hermes host", value: "Not paired")
-            }
-            Section("Devices") {
-                Text("Pairing arrives in M2").foregroundStyle(Tokens.textMuted)
-            }
-        }
-        .scrollContentBackground(.hidden)
-        .background(Tokens.canvas)
-        .navigationTitle("Settings")
-    }
+// MARK: - Previews
+
+#Preview("Root · paired") {
+    let environment = AppEnvironment.preview()
+    RootTabView()
+        .environmentObject(environment)
+        .preferredColorScheme(.dark)
+        .task { await environment.start() }
+}
+
+#Preview("Root · unpaired") {
+    let environment = AppEnvironment.preview(paired: false)
+    RootTabView()
+        .environmentObject(environment)
+        .preferredColorScheme(.dark)
 }
