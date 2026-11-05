@@ -344,6 +344,51 @@ public final class AppModel: ObservableObject {
 
     // MARK: Turn
 
+    /// Re-derive state after a reconnect without destroying a turn that is still arriving.
+    ///
+    /// iOS closes the socket whenever the app leaves the foreground (close code 1001), so `ready`
+    /// fires often — several times per session. The host is the authority, but replacing the view
+    /// unconditionally meant a reply that had already been received disappeared the moment the user
+    /// came back, leaving "thinking" on screen with the answer on the host.
+    ///
+    /// Idle: just re-select. Mid-turn: give the socket's replay (`session.events.since`) a beat,
+    /// then adopt the host's view *without* discarding locally received text.
+    private func reconcile(afterReconnect sid: SessionID) async {
+        guard !isStreaming else {
+            let localText = streamingText
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard selectedSessionID == sid else { return }
+            guard let resumed = try? await client.resumeSession(sid) else { return }
+            guard selectedSessionID == sid else { return }
+
+            if resumed.inflight?.streaming == true {
+                // Still running on the host: keep what we have, adopt its partial text only when
+                // ours is empty (we may have missed the deltas that arrived while suspended).
+                if streamingText.isEmpty { streamingText = resumed.inflight?.assistantText ?? "" }
+                isStreaming = true
+                return
+            }
+
+            // Nothing is running, so nothing more is coming. Anything we already hold is the answer:
+            // the host may not have persisted it yet, and dropping it is the bug this method exists
+            // to prevent.
+            var entries = resumed.entries
+            if !localText.isEmpty,
+               !entries.contains(where: { $0.role == .assistant && $0.text == localText }) {
+                entries.append(TranscriptEntry(id: "recovered-\(sid)-\(entries.count)", role: .assistant, text: localText))
+            }
+            transcript = entries
+            pendingRequests = resumed.openRequests
+            streamingText = ""
+            reasoningText = ""
+            liveTools = []
+            isStreaming = false
+            runningSessions.remove(sid)
+            return
+        }
+        await select(sid)
+    }
+
     public func send() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, let sid = selectedSessionID, !sending else { return }
@@ -675,13 +720,13 @@ public final class AppModel: ObservableObject {
         switch event {
         case .ready:
             connection = .connected
-            // A reconnect means events were lost: a turn may have finished, or its deltas may have
-            // been emitted while the socket was down. The host is the authority, so re-derive the
-            // transcript and the streaming state from `session.resume` instead of waiting for a
-            // `message.complete` that already happened. Without this the app sat on "thinking"
-            // with the finished reply on the host and nothing on screen.
+            // A reconnect can mean events were lost, and the host is the authority — but re-deriving
+            // blindly wiped the visible turn. iOS suspends the socket constantly, so every
+            // foreground sent `ready` and `select()` cleared the transcript and streaming text
+            // mid-turn: the reply demonstrably arrived (audit log: submit accepted, 12 deltas within
+            // 4 s) and then vanished from the screen. Reconcile without destroying a live turn.
             if let sid = selectedSessionID {
-                await select(sid)
+                await reconcile(afterReconnect: sid)
             }
         case .state(let state):
             switch state {
