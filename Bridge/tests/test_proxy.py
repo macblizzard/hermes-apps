@@ -23,6 +23,7 @@ ALLOWED_AUDIT_KEYS = {
     "method",
     "duration_ms",
     "bytes",
+    "path",
     "direction",
     "outcome",
     "reason",

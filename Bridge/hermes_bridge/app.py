@@ -39,7 +39,10 @@ from .proxy import GatewayProxy, LiveSessions
 from .registry import DeviceRegistry
 from .tickets import AttemptThrottle, PairingCodes, TicketStore
 
-PAIRING_CODE_TTL_SECONDS = 120
+#: How long a minted pairing code stays usable. Two minutes is shorter than the walk from the
+#: host to a phone with the app open, and a code is single-use, loopback-minted and rate-limited,
+#: so ten minutes buys usability without buying risk. Override with HERMES_BRIDGE_PAIRING_TTL.
+PAIRING_CODE_TTL_SECONDS = int(os.environ.get("HERMES_BRIDGE_PAIRING_TTL", "600"))
 ACCESS_TOKEN_TTL_SECONDS = 15 * 60
 WS_TICKET_TTL_SECONDS = 30
 PROTOCOL_VERSION = 1
@@ -139,10 +142,24 @@ def create_app(
 
     @app.middleware("http")
     async def no_store(request: Request, call_next):
-        response = await call_next(request)
+        started = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            if request.url.path.startswith("/v1/"):
+                runtime.audit.emit("http", method=request.method, path=request.url.path,
+                                   outcome="500", duration_ms=time.perf_counter() - started)
+            raise
         if request.url.path.startswith("/v1/"):
             response.headers.setdefault("Cache-Control", "no-store")
             response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            # Pairing and token failures were invisible: uvicorn runs with access_log off and the
+            # audit log only covered the websocket, so "the app says the host does not know this
+            # device" could not be traced to a request or a status code. Record method, path,
+            # status and duration — still no bodies and no headers, so no code or token leaks.
+            runtime.audit.emit("http", method=request.method, path=request.url.path,
+                               outcome=str(response.status_code),
+                               duration_ms=time.perf_counter() - started)
         return response
 
     @app.get("/v1/health")

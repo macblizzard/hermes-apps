@@ -211,10 +211,22 @@ public final class AppModel: ObservableObject {
             guard epoch == botEpoch, selectedSessionID == id else { return }
             transcript = resumed.entries
             pendingRequests = resumed.openRequests
-            if let inflight = resumed.inflight {
+            if let inflight = resumed.inflight, inflight.streaming {
                 streamingText = inflight.assistantText
-                isStreaming = inflight.streaming
-                if inflight.streaming { runningSessions.insert(id) }
+                isStreaming = true
+                runningSessions.insert(id)
+            } else {
+                // No turn is running on the host, so nothing more is coming: clear the streaming
+                // state even if this client thought it was mid-turn.
+                //
+                // The socket can close mid-turn (backgrounded app, tunnel blip) and the
+                // `message.complete` then lands while we are away. Without this branch the UI
+                // waited forever for an event that had already happened — observed as an app stuck
+                // on "thinking" with the finished reply never shown. A non-streaming inflight still
+                // carries its partial text, so keep that.
+                streamingText = resumed.inflight?.assistantText ?? ""
+                isStreaming = false
+                runningSessions.remove(id)
             }
         } catch {
             guard epoch == botEpoch, selectedSessionID == id else { return }
@@ -421,6 +433,14 @@ public final class AppModel: ObservableObject {
         switch event {
         case .ready:
             connection = .connected
+            // A reconnect means events were lost: a turn may have finished, or its deltas may have
+            // been emitted while the socket was down. The host is the authority, so re-derive the
+            // transcript and the streaming state from `session.resume` instead of waiting for a
+            // `message.complete` that already happened. Without this the app sat on "thinking"
+            // with the finished reply on the host and nothing on screen.
+            if let sid = selectedSessionID {
+                await select(sid)
+            }
         case .state(let state):
             switch state {
             case .open: connection = .connected

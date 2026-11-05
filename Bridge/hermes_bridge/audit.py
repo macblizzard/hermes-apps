@@ -39,10 +39,12 @@ EVENTS = frozenset(
         "protocol_error",
         "upstream_error",
         "request_abandoned",
+        "http",
     }
 )
 
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
+_SAFE_PATH = re.compile(r"^/[A-Za-z0-9/_.-]{1,96}$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -81,6 +83,7 @@ class AuditLog:
         *,
         device_id: Optional[str] = None,
         method: object = None,
+        path: Optional[str] = None,
         duration_ms: Optional[float] = None,
         nbytes: Optional[int] = None,
         direction: Optional[str] = None,
@@ -92,6 +95,8 @@ class AuditLog:
             raise ValueError(f"unknown audit event: {event!r}")
         record: dict[str, Any] = {"ts": round(time.time(), 3), "event": event}
         record["device"] = _device(device_id)
+        if path is not None:
+            record["path"] = path if _SAFE_PATH.match(path) else "invalid"
         if method is not None:
             record["method"] = _token(method, "invalid")
         if duration_ms is not None:

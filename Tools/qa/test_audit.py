@@ -23,6 +23,7 @@ ALLOWED_KEYS = {
     "event",
     "device",
     "method",
+    "path",
     "duration_ms",
     "bytes",
     "direction",
@@ -109,6 +110,9 @@ def test_each_audit_record_is_one_json_line(relay_factory, caplog):
         assert parsed["event"] in {
             "ws_open", "capabilities_sent", "client_request", "notification",
             "server_request", "server_response", "client_response", "ws_close",
+            # HTTP pairing/token calls made while setting the turn up; the record carries the
+            # route and status only, never a code or a token.
+            "http",
         }, parsed
 
 
