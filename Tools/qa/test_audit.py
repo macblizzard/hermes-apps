@@ -46,7 +46,7 @@ def _run_turn(relay, prompt_text: str = CANARY) -> None:
                 frame = await sock.recv(timeout=5.0)
                 if frame.get("method") == "approval":
                     request = frame
-            await sock.answer(request["id"], {"choice": "allow_once"})
+            await sock.answer(request["id"], {"choice": "once"})
             while (await sock.recv(timeout=5.0)).get("params", {}).get("type") != "message.complete":
                 pass
 

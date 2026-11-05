@@ -239,12 +239,12 @@ def test_approval_round_trip_blocks_the_agent_until_answered(relay_factory):
             request = await sock.recv(timeout=5.0)
             assert request["method"] == "approval", request
             assert request["id"] == "srq-1", request
-            assert request["params"]["choices"] == ["allow_once", "allow_always", "deny"]
+            assert request["params"]["choices"] == ["once", "always", "deny"]
 
             # The agent is blocked: nothing else arrives while the user decides.
             assert await sock.silence(0.25) == []
 
-            await sock.answer("srq-1", {"choice": "allow_once"})
+            await sock.answer("srq-1", {"choice": "once"})
             complete = await sock.expect(type="tool.complete")
             assert complete["params"]["payload"]["ok"] is True
             await sock.expect(type="message.complete")
@@ -255,7 +255,7 @@ def test_approval_round_trip_blocks_the_agent_until_answered(relay_factory):
 
     answers = conn.inbound_responses()
     assert len(answers) == 1, f"expected one answer, saw {answers}"
-    assert answers[0].frame == {"jsonrpc": "2.0", "id": "srq-1", "result": {"choice": "allow_once"}}
+    assert answers[0].frame == {"jsonrpc": "2.0", "id": "srq-1", "result": {"choice": "once"}}
     assert answers[0].at < (conn.first_at("out", "tool.complete") or 0), (
         "the gateway released the tool before the answer arrived"
     )
@@ -318,7 +318,7 @@ def test_resume_replays_the_open_request_and_answering_it_finishes_the_turn(rela
 
             live = await sock.recv(timeout=5.0)
             assert live["method"] == "approval" and live["id"] == "srq-9"
-            await sock.answer("srq-9", {"choice": "allow_once"})
+            await sock.answer("srq-9", {"choice": "once"})
             assert (await sock.expect(type="tool.complete"))["params"]["payload"]["ok"] is True
             await sock.expect(type="message.complete")
 
@@ -333,7 +333,7 @@ def test_a_server_request_with_a_colliding_id_is_remapped_and_restored(relay_fac
     script = inline(
         {"jsonrpc": "2.0", "method": "event", "params": {"type": "gateway.ready", "payload": {}}},
         {"$qa": {"wait_for": {"method": "session.list", "timeout": 10}}},
-        {"jsonrpc": "2.0", "id": 1, "method": "approval", "params": {"choices": ["allow_once", "deny"]}},
+        {"jsonrpc": "2.0", "id": 1, "method": "approval", "params": {"choices": ["once", "deny"]}},
         {"$qa": {"wait_for_response": {"id": 1, "timeout": 10}}},
         {"jsonrpc": "2.0", "method": "event", "params": {"type": "message.complete", "payload": {}}},
         auto={"ping": {"result": {"pong": True}}, "client.capabilities": {"result": CAPS}},
@@ -349,7 +349,7 @@ def test_a_server_request_with_a_colliding_id_is_remapped_and_restored(relay_fac
             request = await sock.recv(timeout=5.0)
             assert request["method"] == "approval"
             assert request["id"] != 1, "the app must never see two live ids that collide"
-            await sock.answer(request["id"], {"choice": "allow_once"})
+            await sock.answer(request["id"], {"choice": "once"})
             await sock.expect(type="message.complete")
             return request["id"]
 

@@ -1,0 +1,36 @@
+[Unit]
+Description=Hermes bridge (native clients ↔ local Hermes TUI gateway)
+Documentation=https://github.com/macblizzard/hermes-apps
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The bridge binds 127.0.0.1 only. TLS and tailnet exposure are tailscale serve's job:
+#   tailscale serve --bg --https=8443 http://127.0.0.1:8787
+ExecStart=/usr/bin/env python3 -m hermes_bridge
+WorkingDirectory=/opt/hermes-apps/Bridge
+EnvironmentFile=/etc/hermes-bridge/bridge.env
+Restart=on-failure
+RestartSec=2
+# Hardening: this process needs loopback networking and its own state dir, nothing else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/hermes-bridge
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# The gateway token lives in the env file and is never rendered in logs or responses.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hermes-bridge
+
+[Install]
+WantedBy=multi-user.target
