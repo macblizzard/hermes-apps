@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+
+# Xcode / XcodeGen
+*.xcodeproj
+*.xcworkspace
+!project.yml
+xcuserdata/
+
+# Swift
+.build/
+.swiftpm/
+Package.resolved
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Local
+.env
+*.log
+fixtures/private/

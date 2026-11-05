@@ -1,0 +1,101 @@
+name: HermesApps
+options:
+  bundleIdPrefix: net.corvus.hermes
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "14.0"
+    iOS: "17.0"
+  groupSortPosition: top
+
+packages:
+  HermesApps:
+    path: .
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+    DEVELOPMENT_TEAM: ""
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+targets:
+  HermesMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: Apps/HermesMac
+    dependencies:
+      - package: HermesApps
+        product: HermesKit
+      - package: HermesApps
+        product: OpenBotUI
+      - package: HermesApps
+        product: HermesRender
+    info:
+      path: Apps/HermesMac/Info.plist
+      properties:
+        CFBundleDisplayName: Hermes
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSMinimumSystemVersion: "14.0"
+        NSHighResolutionCapable: true
+        NSHumanReadableCopyright: "Personal build"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.corvus.hermes.mac
+        PRODUCT_NAME: Hermes
+        ENABLE_HARDENED_RUNTIME: "NO"
+        COMBINE_HIDPI_IMAGES: "YES"
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+
+  HermesMobile:
+    type: application
+    platform: iOS
+    sources:
+      - path: Apps/HermesMobile
+    dependencies:
+      - package: HermesApps
+        product: HermesKit
+      - package: HermesApps
+        product: OpenBotUI
+      - package: HermesApps
+        product: HermesRender
+    info:
+      path: Apps/HermesMobile/Info.plist
+      properties:
+        CFBundleDisplayName: Hermes
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIRequiresFullScreen: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+        NSLocalNetworkUsageDescription: "Hermes connects to your own Hermes host over your private network."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.corvus.hermes.mobile
+        PRODUCT_NAME: Hermes
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+
+schemes:
+  HermesMac:
+    build:
+      targets:
+        HermesMac: all
+    run:
+      config: Debug
+  HermesMobile:
+    build:
+      targets:
+        HermesMobile: all
+    run:
+      config: Debug
