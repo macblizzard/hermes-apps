@@ -19,6 +19,10 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
     func disconnect() async
 
     // Sessions
+    /// Cheapest possible round trip: the gateway answers `{"pong": true}` without touching
+    /// the session database. Used for the connection chip's latency figure — `session.list`
+    /// would make the number depend on how warm the profile is (see `fixtures/NOTES.md` §4).
+    func ping() async throws
     func listSessions(limit: Int) async throws -> [SessionSummary]
     func resumeSession(_ id: SessionID) async throws -> SessionResume
     func createSession(model: String?, provider: String?) async throws -> SessionID

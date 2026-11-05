@@ -184,10 +184,11 @@ public final class AppModel: ObservableObject {
 
     /// Round-trip time of one real request, for the connection chip.
     ///
-    /// `GatewayClientProtocol` has no `ping` verb, so the cheapest honest probe is a
-    /// one-row `session.list`. A host that never answers publishes **nothing** — the chip
-    /// keeps its "direct" label without a number instead of inventing one
-    /// (`fixtures/NOTES.md` §4: silence is a timeout, not a result).
+    /// This is a `ping`: the gateway answers `{"pong": true}` without touching the session
+    /// database, so the number measures the wire and not how warm the profile happens to be.
+    /// (`session.list` was the earlier probe and it is exactly the call observed taking 60 s
+    /// on a cold profile — `fixtures/NOTES.md` §4.) A host that never answers publishes
+    /// **nothing**: the chip keeps its label without a number instead of inventing one.
     public func refreshLatency(budget: TimeInterval = 6) async {
         guard connection.isLive else {
             latencyMS = nil
@@ -197,8 +198,7 @@ public final class AppModel: ObservableObject {
         let started = Date()
         let answered = await withTaskGroup(of: Bool.self) { group -> Bool in
             group.addTask {
-                _ = try? await client.listSessions(limit: 1)
-                return true
+                do { try await client.ping(); return true } catch { return false }
             }
             group.addTask {
                 try? await Task.sleep(nanoseconds: UInt64(max(0.5, budget) * 1_000_000_000))
@@ -417,6 +417,8 @@ public final class PreviewGatewayClient: GatewayClientProtocol, @unchecked Senda
     }
 
     public func disconnect() async {}
+
+    public func ping() async throws {}
 
     public func listSessions(limit: Int) async throws -> [SessionSummary] {
         guard scenario != .empty else { return [] }

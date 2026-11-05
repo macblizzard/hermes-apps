@@ -208,6 +208,13 @@ public actor GatewayClient: GatewayClientProtocol {
 
     // MARK: Sessions
 
+    public func ping() async throws {
+        let result = try await perform("ping", params: .object([:]), timeout: timeouts.call)
+        guard result?["pong"]?.boolValue == true else {
+            throw GatewayError.malformedResponse(method: "ping")
+        }
+    }
+
     public func listSessions(limit: Int) async throws -> [SessionSummary] {
         let result = try await perform("session.list",
                                        params: .object(["limit": .int(Int64(limit))]),

@@ -29,6 +29,7 @@ final class UnpairedGatewayClient: GatewayClientProtocol, @unchecked Sendable {
     func connect() async throws { throw Reason.noHost }
     func disconnect() async {}
 
+    func ping() async throws { throw Reason.noHost }
     func listSessions(limit: Int) async throws -> [SessionSummary] { throw Reason.noHost }
     func resumeSession(_ id: SessionID) async throws -> SessionResume { throw Reason.noHost }
     func createSession(model: String?, provider: String?) async throws -> SessionID { throw Reason.noHost }

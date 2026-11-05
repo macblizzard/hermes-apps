@@ -83,6 +83,9 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: "Hermes connects to your own Hermes host over your private network."
+        # Required the moment the QR scanner asks for the camera: iOS terminates the app
+        # on first capture input without this string, so pairing would look like a crash.
+        NSCameraUsageDescription: "Scan the pairing code shown by your Hermes host to connect this device."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.corvus.hermes.mobile
