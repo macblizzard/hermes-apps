@@ -59,11 +59,17 @@ struct MobileTranscriptRow: View {
             .accessibilityLabel(entry.text)
     }
 
+    /// A tool entry restored from the host's transcript projection.
+    ///
+    /// The projection carries one line — `bash · rsync … · 0.8s · exit 0` — so the name is
+    /// the token before the first separator. Labelling every row "tool" (what this used to
+    /// do) threw away the only identifying word the row has.
     private var toolResult: some View {
-        ToolCard(name: "tool",
-                 summary: firstLine(of: entry.text),
-                 status: .done,
-                 output: entry.text)
+        let parsed = MobileToolRow.parse(entry.text)
+        return MobileToolRow(name: parsed.name,
+                             summary: parsed.summary,
+                             isRunning: false,
+                             durationMS: nil)
     }
 
     private var systemNote: some View {
@@ -74,14 +80,222 @@ struct MobileTranscriptRow: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 2)
     }
+}
 
-    private func firstLine(of text: String) -> String? {
-        guard let line = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true).first else {
+// MARK: - Tool card
+
+/// One tool call, live or restored.
+///
+/// The name is always a real name: `tool.start`'s `name` for a live call, the projection's
+/// leading token for a restored one. Output is drawn only when the caller supplies it
+/// (`showToolOutput` and a non-empty result), so the card never claims "No output." about
+/// a tool it simply chose not to show. Long output scrolls inside the card rather than
+/// pushing the answer off screen.
+struct MobileToolRow: View {
+    let name: String
+    var summary: String? = nil
+    var output: String? = nil
+    var isRunning: Bool = false
+    var durationMS: Int? = nil
+
+    @State private var expanded = false
+
+    /// Never an empty box: the disclosure only exists when there is something behind it.
+    private var shownOutput: String? {
+        guard let output, !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        let trimmed = String(line).trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return nil }
-        return String(trimmed.prefix(60))
+        return output
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+
+            if expanded, let shownOutput {
+                Hairline()
+                Text(shownOutput)
+                    .font(Tokens.mono)
+                    .foregroundStyle(Tokens.textSecondary)
+                    .lineSpacing(5)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous)
+                            .fill(Tokens.sheetInset)
+                    )
+                    .padding(10)
+                    .transition(.opacity)
+            }
+        }
+        .cardSurface()
+        .animation(Motion.toolCard, value: expanded)
+    }
+
+    private var header: some View {
+        Button {
+            guard shownOutput != nil else { return }
+            Haptics.selection()
+            withAnimation(Motion.toolCard) { expanded.toggle() }
+        } label: {
+            HStack(spacing: 8) {
+                statusGlyph
+
+                Text(name)
+                    .font(Tokens.mono)
+                    .foregroundStyle(Tokens.textPrimary)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+
+                if let summary, !summary.isEmpty {
+                    Text(summary)
+                        .font(Tokens.mono)
+                        .foregroundStyle(Tokens.textDim)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 8)
+
+                if let durationText {
+                    Text(durationText)
+                        .font(.system(size: 10, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(Tokens.textDim)
+                        .fixedSize()
+                }
+
+                if shownOutput != nil {
+                    DisclosureGlyph(expanded: expanded)
+                }
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityText)
+        .accessibilityHint(shownOutput == nil ? "" : (expanded ? "Collapse tool output" : "Expand tool output"))
+    }
+
+    @ViewBuilder
+    private var statusGlyph: some View {
+        if isRunning {
+            SpinningRing(color: Tokens.accent, size: 11, lineWidth: 1.5)
+                .frame(width: 14, height: 14)
+        } else {
+            ZStack {
+                Circle().fill(Tokens.controlActive)
+                Image(systemName: "checkmark")
+                    .font(.system(size: 7.5, weight: .bold))
+                    .foregroundStyle(Tokens.textMuted)
+            }
+            .frame(width: 14, height: 14)
+        }
+    }
+
+    private var durationText: String? {
+        guard let durationMS else { return nil }
+        if durationMS < 1_000 { return "\(max(0, durationMS)) ms" }
+        let seconds = Double(durationMS) / 1_000
+        if seconds < 60 { return String(format: "%.1fs", seconds) }
+        let whole = Int(seconds)
+        let rest = whole % 60
+        return rest == 0 ? "\(whole / 60)m" : "\(whole / 60)m \(rest)s"
+    }
+
+    private var accessibilityText: String {
+        var parts = ["Tool", name, isRunning ? "running" : "done"]
+        if let summary, !summary.isEmpty { parts.append(summary) }
+        if let durationText { parts.append(durationText) }
+        return parts.joined(separator: ", ")
+    }
+
+    // MARK: Parsing a restored row
+
+    /// `bash · rsync -a ~/vault/ · 0.8s · exit 0` → (`bash`, `rsync -a ~/vault/ · 0.8s · exit 0`).
+    ///
+    /// A name is a single token; anything with a space in it is prose and stays in the
+    /// summary, so a projection line that carries no name is labelled "Tool" rather than
+    /// slicing a sentence in half.
+    static func parse(_ text: String) -> (name: String, summary: String?) {
+        let parts = text.components(separatedBy: " · ")
+        let head = (parts.first ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let isName = !head.isEmpty
+            && head.count <= 32
+            && !head.contains(" ")
+            && !head.contains("\n")
+
+        guard isName else {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ("Tool", trimmed.isEmpty ? nil : trimmed)
+        }
+
+        let rest = parts.dropFirst().joined(separator: " · ")
+        return (head, rest.isEmpty ? nil : rest)
+    }
+}
+
+// MARK: - Reasoning
+
+/// The model's thinking, as a secondary block.
+///
+/// Collapsed by default and recessed behind the answer: reasoning is context for why the
+/// reply says what it says, not the reply itself. It only exists when the host streamed
+/// `thinking.delta` text *and* the user asked for it in Settings.
+struct MobileReasoningBlock: View {
+    let text: String
+
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                Haptics.selection()
+                withAnimation(Motion.toolCard) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Tokens.textDim)
+
+                    Text("Reasoning")
+                        .font(TypeScale.font(TypeScale.label, weight: .semibold))
+                        .foregroundStyle(Tokens.textMuted)
+
+                    Spacer(minLength: 8)
+
+                    DisclosureGlyph(expanded: expanded)
+                }
+                .padding(.horizontal, 11)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Reasoning")
+            .accessibilityHint(expanded ? "Collapse reasoning" : "Expand reasoning")
+
+            if expanded {
+                Text(text)
+                    .font(TypeScale.font(TypeScale.md))
+                    .foregroundStyle(Tokens.textMuted)
+                    .lineSpacing(3)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 11)
+                    .padding(.bottom, 10)
+                    .transition(.opacity)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: Tokens.radiusCard, style: .continuous)
+                .fill(Tokens.sheetInset)
+        )
+        .hairlineBorder()
+        .animation(Motion.toolCard, value: expanded)
     }
 }
 
@@ -123,7 +337,7 @@ struct MobileTranscriptEmpty: View {
                                                        text: "Snapshotting the vault first.\n\n- `restic backup ~/vault`\n- then a **dry-run** diff of `docs/`"))
             MobileTranscriptRow(entry: TranscriptEntry(id: "3",
                                                        role: .tool,
-                                                       text: "repo 8f21c1a opened\nsnapshot 41e2 saved · 118 MB"))
+                                                       text: "bash · rsync -a ~/vault/ ~/backup/vault/ · 0.8s · exit 0"))
             MobileTranscriptRow(entry: TranscriptEntry(id: "4",
                                                        role: .system,
                                                        text: "Session resumed from history."))
@@ -134,8 +348,26 @@ struct MobileTranscriptEmpty: View {
     .preferredColorScheme(.dark)
 }
 
+#Preview("Tool + reasoning") {
+    ScrollView {
+        VStack(alignment: .leading, spacing: 14) {
+            MobileReasoningBlock(text: "The vault is large; a dry-run first keeps the diff small. Then rsync with --delete only after the diff is reviewed.")
+            MobileToolRow(name: "read_file",
+                          summary: "Sources/HermesKit/GatewayClient.swift",
+                          output: "public struct Bot: Identifiable, Hashable, Sendable { … }",
+                          durationMS: 240)
+            MobileToolRow(name: "bash",
+                          summary: "swift build",
+                          isRunning: true)
+        }
+        .padding(16)
+    }
+    .background(Tokens.canvas)
+    .preferredColorScheme(.dark)
+}
+
 #Preview("Empty conversation") {
-    MobileTranscriptEmpty(title: "Vault backup + docs sync")
+    MobileTranscriptEmpty(title: "Cody")
         .frame(maxHeight: .infinity)
         .background(Tokens.canvas)
         .preferredColorScheme(.dark)

@@ -3,26 +3,130 @@ import HermesKit
 import HermesAppKit
 import OpenBotUI
 
-/// The conversation.
+/// The conversation with one bot — one endless thread, always.
 ///
-/// Native chrome does the work: a compact principal toolbar item is the header, the
-/// composer is a bottom safe-area inset (so the keyboard pushes it rather than covering
-/// it), and the reconnect strip is a top inset. Everything else is the transcript.
+/// There is no session browser here and none anywhere else: opening a bot asks the model
+/// for that bot's stored (or freshly created) session and attaches to it. The header is
+/// the bot, the model the host named, the wire latency and how full the context window is;
+/// the only two things you can do to the thread — compact it or reset it — sit behind the
+/// overflow menu, and resetting asks first.
 struct ConversationScreen: View {
     @ObservedObject var model: AppModel
     @EnvironmentObject private var app: AppEnvironment
 
-    let sessionID: SessionID
+    let bot: Bot
 
+    @State private var sessionID: SessionID?
+    @State private var isOpening = true
     @State private var showApprovalSheet = false
+    @State private var showResetConfirm = false
     @State private var notice: String?
     @State private var lastSeenRequestCount = 0
     @State private var hasLoaded = false
 
     private static let bottomID = "conversation-bottom"
 
-    private var title: String { app.title(for: sessionID) }
+    private var title: String { bot.displayName }
 
+    var body: some View {
+        transcriptScroll
+        .background(Tokens.canvas)
+        .safeAreaInset(edge: .bottom, spacing: 0) { composerArea }
+        .mobileConnectionBanner(connection: app.visibleConnection,
+                                turnRunning: model.isStreaming,
+                                host: app.hostLabel,
+                                retry: { Task { await app.reconnect() } })
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { toolbarContent }
+        .safeAreaInset(edge: .top, spacing: 0) { headerStrip }
+        .task(id: bot.id) { await openConversation() }
+        .onChange(of: model.pendingRequests.count) { count in
+            let arrived = hasLoaded && count > lastSeenRequestCount
+            lastSeenRequestCount = count
+            guard arrived, model.pendingRequests.first != nil else { return }
+            Haptics.approvalArrived()
+            showApprovalSheet = true
+        }
+        .sheet(isPresented: $showApprovalSheet) {
+            MobileApprovalSheet(model: model, request: model.pendingRequests.first)
+        }
+        .confirmationDialog("Reset this conversation?",
+                            isPresented: $showResetConfirm,
+                            titleVisibility: .visible) {
+            Button("Reset conversation", role: .destructive) {
+                Task { await resetConversation() }
+            }
+            Button("Keep it", role: .cancel) {}
+        } message: {
+            Text("This phone forgets its thread with \(title) and starts a new one on the next message. The old conversation stays on the host, and you can still open it there.")
+        }
+        .alert("Not yet", isPresented: noticeBinding) {
+            Button("OK", role: .cancel) { notice = nil }
+        } message: {
+            Text(notice ?? "")
+        }
+    }
+
+    // MARK: Header
+
+    /// The header's second line, directly under the bot name: what is answering, over what
+    /// wire, and how much of the window the thread has used. All three are facts the host
+    /// reported — a missing fact is omitted, never guessed.
+    private var headerStrip: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                if let label = modelChipLabel {
+                    StatusChip(label, tone: .neutral, size: .small)
+                }
+
+                if let usage = contextUsage {
+                    Text(usage)
+                        .font(.system(size: 10, design: .monospaced))
+                        .monospacedDigit()
+                        .foregroundStyle(contextTint)
+                        .lineLimit(1)
+                        .accessibilityLabel("Context used, \(usage) tokens")
+                }
+
+                Spacer(minLength: 6)
+
+                MobileConnectionPill(connection: model.connection, rttMS: app.effectiveRTT)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .frame(minHeight: 30)
+
+            Hairline(color: Tokens.border)
+        }
+        .background(Tokens.canvas)
+    }
+
+    /// `deepseek-v4.1-flash` fits; a provider-qualified id does not, and the chip is
+    /// `fixedSize`, so it is shortened here rather than pushing the latency chip off.
+    private var modelChipLabel: String? {
+        guard let raw = model.modelLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        let words = raw.split(separator: " ")
+        let short = words.prefix(2).joined(separator: " ")
+        guard !short.isEmpty else { return nil }
+        return short.count <= 22 ? short : String(short.prefix(21)) + "…"
+    }
+
+    /// `12k / 1M` — only when the host has reported both halves of the window.
+    private var contextUsage: String? {
+        guard let used = model.contextUsed, let limit = model.contextMax else { return nil }
+        return "\(MobileTokens.short(used)) / \(MobileTokens.short(limit))"
+    }
+
+    private var contextTint: Color {
+        guard let fraction = model.contextFraction else { return Tokens.textDim }
+        if fraction >= 0.85 { return Tokens.danger }
+        if fraction >= 0.70 { return Tokens.warning }
+        return Tokens.textDim
+    }
+
+    // MARK: Transcript
 
     /// Split out of `body` on purpose: a ScrollViewReader + ScrollView + LazyVStack + six
     /// conditionals in one expression exceeded the type-checker's budget
@@ -42,13 +146,23 @@ struct ConversationScreen: View {
             .onChange(of: model.streamingText) {
                 scroll(proxy, animated: false)
             }
+            .onChange(of: model.liveTools.count) {
+                scroll(proxy, animated: false)
+            }
+            .onChange(of: model.reasoningText) {
+                scroll(proxy, animated: false)
+            }
         }
     }
 
     private var transcriptList: some View {
         LazyVStack(alignment: .leading, spacing: 16) {
-            if model.transcript.isEmpty && !model.isStreaming && model.pendingRequests.isEmpty {
-                MobileTranscriptEmpty(title: title)
+            if isBlank {
+                if isOpening {
+                    openingState
+                } else {
+                    MobileTranscriptEmpty(title: title)
+                }
             }
 
             ForEach(model.transcript) { entry in
@@ -58,6 +172,23 @@ struct ConversationScreen: View {
 
             if !model.pendingRequests.isEmpty {
                 pendingSection
+            }
+
+            if let notice = model.compactionNotice {
+                // Auto-compaction rewrites the stored transcript; without a line the conversation
+                // would just get shorter with no explanation.
+                Label(notice, systemImage: "arrow.triangle.2.circlepath")
+                    .font(TypeScale.font(TypeScale.sm))
+                    .foregroundStyle(Tokens.textSecondary)
+                    .accessibilityIdentifier("compactionNotice")
+            }
+
+            if model.showReasoning, !model.reasoningText.isEmpty {
+                MobileReasoningBlock(text: model.reasoningText)
+            }
+
+            if !model.liveTools.isEmpty {
+                liveToolsSection
             }
 
             if model.isStreaming || !model.streamingText.isEmpty {
@@ -70,72 +201,93 @@ struct ConversationScreen: View {
         }
     }
 
-    var body: some View {
-        transcriptScroll
-        .background(Tokens.canvas)
-        .safeAreaInset(edge: .bottom, spacing: 0) { composerArea }
-        .mobileConnectionBanner(connection: app.visibleConnection,
-                                turnRunning: model.isStreaming,
-                                host: app.hostLabel,
-                                retry: { Task { await app.reconnect() } })
-        .navigationTitle(title)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarContent }
-        .task(id: sessionID) {
-            await model.select(sessionID)
-            // Requests that were already open when this session was resumed belong in the
-            // transcript, not in a sheet the user never asked for; only *arrivals* pop one.
-            lastSeenRequestCount = model.pendingRequests.count
-            hasLoaded = true
+    private var isBlank: Bool {
+        model.transcript.isEmpty
+            && !model.isStreaming
+            && model.pendingRequests.isEmpty
+            && model.liveTools.isEmpty
+            && model.reasoningText.isEmpty
+    }
+
+    private var openingState: some View {
+        HStack(spacing: 10) {
+            SpinningRing(color: Tokens.textMuted, size: 12, lineWidth: 1.5)
+            Text("Opening \(title)…")
+                .font(TypeScale.font(TypeScale.lg))
+                .foregroundStyle(Tokens.textMuted)
         }
-        .onChange(of: model.pendingRequests.count) { count in
-            let arrived = hasLoaded && count > lastSeenRequestCount
-            lastSeenRequestCount = count
-            guard arrived, model.pendingRequests.first != nil else { return }
-            Haptics.approvalArrived()
-            showApprovalSheet = true
-        }
-        .sheet(isPresented: $showApprovalSheet) {
-            MobileApprovalSheet(model: model, request: model.pendingRequests.first)
-        }
-        .alert("Not yet", isPresented: noticeBinding) {
-            Button("OK", role: .cancel) { notice = nil }
-        } message: {
-            Text(notice ?? "")
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
+    }
+
+    /// Live tool calls for the turn in flight.
+    ///
+    /// `input`/`output` are copied out as `String?` first: the card takes optional text, and
+    /// the model is free to hand back either shape. The output is only passed when the user
+    /// asked to see tool output in Settings *and* the tool actually produced some — an empty
+    /// result is not a result.
+    private var liveToolsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(model.liveTools) { tool in
+                let input: String? = tool.input
+                let output: String? = tool.output
+                MobileToolRow(name: tool.name,
+                              summary: toolSummary(input),
+                              output: model.showToolOutput ? output : nil,
+                              isRunning: tool.isRunning,
+                              durationMS: tool.durationMS)
+            }
         }
     }
 
-    // MARK: Header
+    /// The first line of a tool's arguments, short enough for a card header.
+    private func toolSummary(_ input: String?) -> String? {
+        guard let input, !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let firstLine = input.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: true)
+            .first.map(String.init) ?? input
+        let trimmed = firstLine.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : String(trimmed.prefix(90))
+    }
+
+    // MARK: Header controls
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .principal) {
-            VStack(spacing: 3) {
-                Text(title)
-                    .font(TypeScale.font(TypeScale.sessionTitle, weight: .semibold))
-                    .foregroundStyle(Tokens.textPrimary)
-                    .lineLimit(1)
-
-                HStack(spacing: 6) {
-                    if let label = app.modelChipLabel {
-                        StatusChip(label, tone: .neutral, size: .small)
-                    }
-                    MobileConnectionPill(connection: model.connection, rttMS: app.effectiveRTT)
-                }
-            }
-            .accessibilityElement(children: .combine)
-        }
-
         ToolbarItem(placement: .topBarTrailing) {
-            if model.isStreaming {
-                Button {
-                    Haptics.impact()
-                    Task { await model.interrupt() }
-                } label: {
-                    Image(systemName: "stop.circle")
-                        .foregroundStyle(Tokens.danger)
+            HStack(spacing: 14) {
+                if model.isStreaming {
+                    Button {
+                        Haptics.impact()
+                        Task { await model.interrupt() }
+                    } label: {
+                        Image(systemName: "stop.circle")
+                            .foregroundStyle(Tokens.danger)
+                    }
+                    .accessibilityLabel("Interrupt the turn")
                 }
-                .accessibilityLabel("Interrupt the turn")
+
+                Menu {
+                    Button {
+                        Task { await model.compressNow() }
+                    } label: {
+                        Label("Compact now", systemImage: "arrow.down.right.and.arrow.up.left")
+                    }
+                    .disabled(sessionID == nil)
+
+                    Divider()
+
+                    Button(role: .destructive) {
+                        showResetConfirm = true
+                    } label: {
+                        Label("Reset conversation", systemImage: "arrow.counterclockwise")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .foregroundStyle(Tokens.textSecondary)
+                }
+                .accessibilityLabel("Conversation actions")
             }
         }
     }
@@ -170,8 +322,9 @@ struct ConversationScreen: View {
             Hairline(color: Tokens.border)
 
             Composer(text: $model.draft,
-                     placeholder: "Message \(app.selectedBotName)",
+                     placeholder: "Message \(title)",
                      isSending: model.isBusy,
+                     isDisabled: sessionID == nil,
                      onSend: { Task { await model.send() } },
                      onAttach: { notice = "Attachments arrive with the file-handling milestone." },
                      onMic: { notice = "Dictation arrives with the voice milestone." },
@@ -206,6 +359,46 @@ struct ConversationScreen: View {
         .background(Tokens.dangerSoft)
     }
 
+    // MARK: Endless session
+
+    /// One thread per bot: resume the stored session, or let the model create and store a
+    /// new one, then attach to it. The id comes from the model, never from a session list —
+    /// and the model does the attaching (bot switch, resume, transcript) in one place, so
+    /// there is no second resume here.
+    private func openConversation() async {
+        isOpening = true
+
+        if let sid = await model.endlessSession(for: bot.id) {
+            sessionID = sid
+        } else {
+            sessionID = nil
+        }
+
+        // Requests that were already open when this session was resumed belong in the
+        // transcript, not in a sheet the user never asked for; only *arrivals* pop one.
+        lastSeenRequestCount = model.pendingRequests.count
+        hasLoaded = true
+        isOpening = false
+    }
+
+    /// Forget this bot's stored session and open a fresh one. The old session is left on
+    /// the host — resetting is a phone-side decision about what to continue from.
+    private func resetConversation() async {
+        Haptics.impact()
+        // Clears this bot's stored id and the thread on screen; the next open creates and
+        // stores a new session, so the composer is disabled until that lands.
+        model.resetEndlessSession(for: bot.id)
+        sessionID = nil
+        isOpening = true
+
+        if let sid = await model.endlessSession(for: bot.id) {
+            sessionID = sid
+        }
+
+        lastSeenRequestCount = model.pendingRequests.count
+        isOpening = false
+    }
+
     // MARK: Helpers
 
     private var noticeBinding: Binding<Bool> {
@@ -232,7 +425,7 @@ struct ConversationScreen: View {
 #Preview("Conversation") {
     let environment = AppEnvironment.preview()
     NavigationStack {
-        ConversationScreen(model: environment.model, sessionID: "preview-1")
+        ConversationScreen(model: environment.model, bot: Bot(id: "cody", displayName: "Cody"))
     }
     .environmentObject(environment)
     .preferredColorScheme(.dark)
@@ -242,7 +435,7 @@ struct ConversationScreen: View {
 #Preview("Conversation · streaming") {
     let environment = AppEnvironment.preview(scenario: .streaming)
     NavigationStack {
-        ConversationScreen(model: environment.model, sessionID: "preview-1")
+        ConversationScreen(model: environment.model, bot: Bot(id: "cody", displayName: "Cody"))
     }
     .environmentObject(environment)
     .preferredColorScheme(.dark)
@@ -252,7 +445,7 @@ struct ConversationScreen: View {
 #Preview("Conversation · approval arrives") {
     let environment = AppEnvironment.preview(scenario: .approval)
     NavigationStack {
-        ConversationScreen(model: environment.model, sessionID: "preview-1")
+        ConversationScreen(model: environment.model, bot: Bot(id: "cody", displayName: "Cody"))
     }
     .environmentObject(environment)
     .preferredColorScheme(.dark)

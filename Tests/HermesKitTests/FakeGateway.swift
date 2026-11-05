@@ -343,8 +343,19 @@ enum EventDigest {
         events.compactMap { if case .messageDelta(_, let text) = $0 { return text } else { return nil } }
     }
 
+    static func reasoningDeltas(_ events: [ClientEvent]) -> [String] {
+        events.compactMap { if case .thinkingDelta(_, let text) = $0 { return text } else { return nil } }
+    }
+
     static func completions(_ events: [ClientEvent]) -> [String] {
         events.compactMap { if case .messageComplete(_, let text) = $0 { return text } else { return nil } }
+    }
+
+    static func contextUsages(_ events: [ClientEvent]) -> [(used: Int, max: Int, percent: Double?)] {
+        events.compactMap {
+            if case .contextUsage(_, let used, let max, let percent) = $0 { return (used, max, percent) }
+            return nil
+        }
     }
 
     static func requests(_ events: [ClientEvent]) -> [ServerRequest] {
@@ -377,18 +388,18 @@ enum EventDigest {
         events.compactMap { if case .sessionUpdated(let id) = $0 { return id } else { return nil } }
     }
 
-    static func toolCompletions(_ events: [ClientEvent]) -> [(callID: String, output: String?, ok: Bool, durationMS: Int?)] {
+    static func toolCompletions(_ events: [ClientEvent]) -> [(name: String?, callID: String, output: String?, ok: Bool, durationMS: Int?)] {
         events.compactMap {
-            if case .toolComplete(_, let callID, let output, let ok, let duration) = $0 {
-                return (callID, output, ok, duration)
+            if case .toolComplete(_, let name, let callID, let output, let ok, let duration) = $0 {
+                return (name, callID, output, ok, duration)
             }
             return nil
         }
     }
 
-    static func toolStarts(_ events: [ClientEvent]) -> [(name: String, callID: String)] {
+    static func toolStarts(_ events: [ClientEvent]) -> [(name: String, callID: String, input: String)] {
         events.compactMap {
-            if case .toolStart(_, let name, let callID, _) = $0 { return (name, callID) }
+            if case .toolStart(_, let name, let callID, let input) = $0 { return (name, callID, input) }
             return nil
         }
     }

@@ -5,10 +5,14 @@ import OpenBotUI
 
 /// iOS shell.
 ///
-/// Native chrome only — `TabView`, `NavigationStack`, `.searchable`, `.toolbar`, `.sheet`,
-/// `.safeAreaInset` — because the platform's smoothness lives there: interactive pop,
-/// rubber-band scrolling, keyboard avoidance and the system tab bar. Nothing here draws a
-/// fake navigation bar or imitation glass.
+/// Native chrome only — `TabView`, `NavigationStack`, `.searchable`, `.toolbar`, `.sheet` —
+/// because the platform's smoothness lives there: interactive pop, rubber-band scrolling,
+/// keyboard avoidance and the system tab bar. Nothing here draws a fake navigation bar or
+/// imitation glass.
+///
+/// Two tabs, because there are two things the app can do: talk to a bot, and change how it
+/// talks. The first tab *is* the bot directory — no drawer, no hidden switcher, no session
+/// list (`docs/ENDLESS-CHAT.md` §1).
 @main
 struct HermesMobileApp: App {
     @StateObject private var app = AppEnvironment()
@@ -30,8 +34,8 @@ struct RootTabView: View {
 
     var body: some View {
         TabView {
-            ChatsTab(model: app.model)
-                .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
+            BotsTab(model: app.model)
+                .tabItem { Label("Bots", systemImage: "person.2") }
 
             SettingsTab(model: app.model)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
@@ -41,35 +45,34 @@ struct RootTabView: View {
         }
         .onChange(of: scenePhase) { phase in
             // A phone comes back from the background with a dead socket; reconnect once
-            // rather than waiting for the user to shake it.
+            // rather than waiting for the user to shake it. A host the user disconnected on
+            // purpose stays disconnected — that is a choice, not a dropped socket.
             guard phase == .active,
                   app.isPaired,
+                  !app.isDisconnectedByUser,
                   !app.model.connection.isLive else { return }
             Task { await app.reconnect() }
         }
     }
 }
 
-/// The Chats tab owns its own navigation path so switching tabs keeps the pushed
+/// The bots tab owns its own navigation path so switching tabs keeps the pushed
 /// conversation where the user left it.
-struct ChatsTab: View {
+///
+/// One conversation per bot is the whole model, so the path holds a `Bot` and nothing else:
+/// there is no session to address, and going back is the only way out of a thread.
+struct BotsTab: View {
     @ObservedObject var model: AppModel
     @State private var path = NavigationPath()
 
     var body: some View {
         NavigationStack(path: $path) {
-            ChatsScreen(model: model, onOpenSession: { path.append($0) })
-                .navigationDestination(for: SessionID.self) { id in
-                    ConversationScreen(model: model, sessionID: id)
+            BotListScreen(model: model, onOpenBot: { path.append($0) })
+                .navigationDestination(for: Bot.self) { bot in
+                    ConversationScreen(model: model, bot: bot)
                 }
         }
         .badge(model.pendingRequests.count)
-        // A pushed conversation belongs to the bot it was opened under. Switching bots
-        // therefore returns to the list rather than leaving one bot's transcript behind
-        // the other bot's sessions.
-        .onChange(of: model.selectedBotID) { _ in
-            path = NavigationPath()
-        }
     }
 }
 

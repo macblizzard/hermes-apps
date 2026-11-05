@@ -64,52 +64,113 @@ enum GatewayJSON {
 enum GatewayEventDecoder {
 
     /// `nil` means "an event we do not model yet" and the caller emits `.unknown` rather than
-    /// dropping it — a Hermes upgrade must never make the transcript go quiet.
-    static func event(type: String, session: SessionID, payload: JSONValue) -> ClientEvent? {
+    /// dropping it — a Hermes upgrade must never make the transcript go quiet. An **empty** array
+    /// is the different case: a modelled event that carries nothing to show (an empty
+    /// `thinking.delta` heartbeat, the `null text` segment boundary), which is not worth an
+    /// `.unknown`.
+    static func events(type: String, session: SessionID, payload: JSONValue) -> [ClientEvent]? {
         switch type {
         case "message.delta":
             // A null `text` is the reply-segment boundary, not an empty chunk: emitting "" would
             // make a renderer insert a break where the model wrote nothing.
-            guard let text = payload["text"]?.stringValue else { return nil }
-            return .messageDelta(session: session, text: text)
+            guard let text = payload["text"]?.stringValue else { return [] }
+            return [.messageDelta(session: session, text: text)]
+
+        case "thinking.delta":
+            // Measured: `{"text": "..."}` and, repeatedly, `{"text": ""}` as a heartbeat while the
+            // model is still deciding. The heartbeat is not content and must not reach a UI that
+            // would read an empty chunk as "reasoning finished, clear the bubble".
+            guard let text = payload["text"]?.stringValue, !text.isEmpty else { return [] }
+            return [.thinkingDelta(session: session, text: text)]
 
         case "message.complete":
-            return .messageComplete(session: session, text: GatewayJSON.text(payload["text"]) ?? "")
+            // Usage rides on the completion, and the compaction decision is made on it, so the
+            // count is published *before* the completion the app reacts to.
+            var events: [ClientEvent] = []
+            if let usage = usage(payload) {
+                events.append(.contextUsage(session: session,
+                                            used: usage.used,
+                                            max: usage.max,
+                                            percent: usage.percent))
+            }
+            events.append(.messageComplete(session: session, text: GatewayJSON.text(payload["text"]) ?? ""))
+            return events
 
         case "tool.start":
             guard let callID = payload["tool_id"]?.stringValue ?? payload["tool_call_id"]?.stringValue
-            else { return nil }
-            return .toolStart(session: session,
-                              name: payload["name"]?.stringValue ?? "",
-                              callID: callID,
-                              input: payload["args"] ?? payload["input"])
+            else { return [] }
+            return [.toolStart(session: session,
+                               name: payload["name"]?.stringValue ?? "",
+                               callID: callID,
+                               input: toolInput(payload))]
 
         case "tool.progress":
-            guard let callID = payload["tool_id"]?.stringValue else { return nil }
-            return .toolProgress(session: session, callID: callID, text: progressText(payload))
+            guard let callID = payload["tool_id"]?.stringValue else { return [] }
+            return [.toolProgress(session: session, callID: callID, text: progressText(payload))]
 
         case "tool.complete":
-            guard let callID = payload["tool_id"]?.stringValue else { return nil }
-            return .toolComplete(session: session,
-                                 callID: callID,
-                                 output: GatewayJSON.text(payload["result_text"])
-                                     ?? payload["summary"]?.stringValue
-                                     ?? GatewayJSON.text(payload["result"]),
-                                 ok: succeeded(payload),
-                                 durationMS: payload["duration_s"]?.numberValue.map { Int(($0 * 1000).rounded()) })
+            guard let callID = payload["tool_id"]?.stringValue else { return [] }
+            return [.toolComplete(session: session,
+                                  name: payload["name"]?.stringValue,
+                                  callID: callID,
+                                  output: toolOutput(payload),
+                                  ok: succeeded(payload),
+                                  durationMS: payload["duration_s"]?.numberValue.map { Int(($0 * 1000).rounded()) })]
 
         // The backend has no single "session changed" event; these are the three that move a row in
         // the rail, and one repaint signal covers all of them.
         case "session.info", "session.title", "session.reclaimed", "session.control.update":
-            return .sessionUpdated(session)
+            return [.sessionUpdated(session)]
 
         case "error":
-            return .error(code: payload["code"]?.intValue.map { Int($0) },
-                          message: payload["message"]?.stringValue ?? "unknown gateway error")
+            return [.error(code: payload["code"]?.intValue.map { Int($0) },
+                           message: payload["message"]?.stringValue ?? "unknown gateway error")]
 
         default:
             return nil
         }
+    }
+
+    /// The first event of a type, for callers that model at most one (`gateway.ready`, tests).
+    static func event(type: String, session: SessionID, payload: JSONValue) -> ClientEvent? {
+        events(type: type, session: session, payload: payload)?.first
+    }
+
+    /// What the tool was called with, as the one line a card can show.
+    ///
+    /// `tool.start` carries `args` (an object on most tools), `args_text` (the raw call text when
+    /// the host has already serialised it), and `context`/`preview` for tools whose argument is a
+    /// path or a snippet. Preferring `args_text` avoids re-serialising a body the host already
+    /// formatted; the rest keep the row from being empty.
+    private static func toolInput(_ payload: JSONValue) -> String {
+        if let text = payload["args_text"]?.stringValue, !text.isEmpty { return text }
+        if let args = payload["args"], args != .null, let text = GatewayJSON.text(args) { return text }
+        if let context = payload["context"]?.stringValue, !context.isEmpty { return context }
+        return payload["preview"]?.stringValue ?? ""
+    }
+
+    /// What the tool produced, resolved in the order the wire actually populates.
+    ///
+    /// Measured: `result_text` is what a tool writes for a human and is usually present; `result`
+    /// is the structured payload (stringified here so a JSON-only result still renders instead of
+    /// blank); `summary` is the fallback for tools that only describe themselves. Reading
+    /// `result` first — or a key that is never sent — is why every finished card said "No output."
+    private static func toolOutput(_ payload: JSONValue) -> String? {
+        if let text = payload["result_text"]?.stringValue, !text.isEmpty { return text }
+        if let result = payload["result"], result != .null,
+           let text = GatewayJSON.text(result), !text.isEmpty { return text }
+        if let summary = payload["summary"]?.stringValue, !summary.isEmpty { return summary }
+        return nil
+    }
+
+    /// `usage` on `message.complete`. `context_max` is what makes the count meaningful, so a body
+    /// without it is reported as no usage rather than as "0 of 0".
+    private static func usage(_ payload: JSONValue) -> (used: Int, max: Int, percent: Double?)? {
+        guard let usage = payload["usage"]?.objectValue,
+              let used = usage["context_used"]?.intValue else { return nil }
+        return (used: Int(used),
+                max: Int(usage["context_max"]?.intValue ?? 0),
+                percent: usage["context_percent"]?.numberValue)
     }
 
     private static func progressText(_ payload: JSONValue) -> String {
@@ -276,6 +337,25 @@ enum GatewayPayloadDecoder {
             }
         }
         return options
+    }
+
+    /// `model.options`, with the host's own answer to "what is running".
+    ///
+    /// The top-level `model`/`provider` pair is authoritative (measured: `deepseek-v4.1-flash` on
+    /// `opencode-go`), while `providers[0].models[0]` is merely the first entry of a menu — reading
+    /// that is what labelled the model chip `anthropic/claude-fable…` on a host running DeepSeek.
+    /// When the host omits the pair the catalogue is still useful, so the options survive and
+    /// `current` stays nil rather than being guessed.
+    static func modelCatalog(_ result: JSONValue?) throws -> ModelCatalog {
+        let options = try modelOptions(result)
+        guard let model = result?["model"]?.stringValue, !model.isEmpty else {
+            return ModelCatalog(current: nil, options: options)
+        }
+        let provider = result?["provider"]?.stringValue
+            ?? options.first { $0.id == model }?.provider
+            ?? ""
+        return ModelCatalog(current: ModelOption(id: model, provider: provider, label: model),
+                            options: options)
     }
 
     struct EventReplay {

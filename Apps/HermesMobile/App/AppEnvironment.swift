@@ -27,10 +27,10 @@ final class AppEnvironment: ObservableObject {
     @Published private(set) var isPairing = false
     @Published private(set) var pairingError: String?
 
-    // MARK: Bots
-
-    /// The bot switcher sheet on the Chats screen.
-    @Published var isBotSwitcherPresented = false
+    /// Set by Settings → Disconnect. The app reconnects a dead socket on its own when it
+    /// returns to the foreground; a socket the user closed on purpose is not dead, so this
+    /// keeps the scene-phase retry from silently undoing that choice.
+    @Published private(set) var isDisconnectedByUser = false
 
     // MARK: Devices
 
@@ -38,11 +38,6 @@ final class AppEnvironment: ObservableObject {
     @Published private(set) var devicesLoading = false
     @Published private(set) var devicesError: String?
 
-    // MARK: Host facts the shared model does not carry
-
-    @Published private(set) var modelLabel: String?
-
-    private let client: GatewayClientProtocol
     private let bridge: BridgeServiceProtocol
     private let box: CredentialBox
 
@@ -72,7 +67,6 @@ final class AppEnvironment: ObservableObject {
             })
         }
         self.box = box
-        self.client = resolvedClient
         self.model = AppModel(client: resolvedClient, hostName: store.host?.host ?? "hermes")
     }
 
@@ -84,30 +78,12 @@ final class AppEnvironment: ObservableObject {
         store.host?.host ?? model.hostName
     }
 
-    /// The bot whose sessions the Chats list is showing.
-    var selectedBot: Bot? { model.selectedBot }
-
-    /// Chrome that has room for one name (the composer placeholder, the sheet's footer).
-    var selectedBotName: String {
-        selectedBot?.displayName ?? model.hostName
-    }
-
     var isPaired: Bool { store.host != nil }
 
     /// What the banner and the pill are allowed to say. An unpaired app is `.idle`, never
     /// "offline" — there is no host to be offline from.
     var visibleConnection: AppModel.Connection {
         store.isPaired ? model.connection : .idle
-    }
-
-    /// The header's model chip is `fixedSize`, so a long model id has to be shortened
-    /// here rather than pushing the conversation title off screen.
-    var modelChipLabel: String? {
-        guard let label = modelLabel else { return nil }
-        let words = label.split(separator: " ")
-        let short = words.prefix(2).joined(separator: " ")
-        guard !short.isEmpty else { return nil }
-        return short.count <= 22 ? short : String(short.prefix(21)) + "…"
     }
 
     /// `AppModel.refreshLatency()` owns the measurement; the pill reads it, never invents
@@ -123,34 +99,13 @@ final class AppEnvironment: ObservableObject {
         #endif
     }
 
-    /// `needs you` on the chats list is the session the open requests belong to.
-    func needsYou(_ session: SessionSummary) -> Bool {
-        !model.pendingRequests.isEmpty && model.selectedSessionID == session.id
-    }
-
-    func title(for sessionID: SessionID) -> String {
-        model.sessions.first(where: { $0.id == sessionID })?.title ?? "Session"
-    }
-
     // MARK: - Bots
 
     /// Re-read the host's bot directory. `AppModel.start()` already does this on connect;
-    /// this is the explicit retry from the switcher and the Chats empty state. The session
-    /// list is re-read too, so a directory change cannot leave another bot's rows on screen.
+    /// this is the explicit retry behind pull-to-refresh and the list's empty state. Bots
+    /// are the only thing this app lists now — there is no session list to keep in step.
     func loadBots() async {
         await model.loadBots()
-        await model.loadSessions()
-    }
-
-    /// Switch bots from the Chats sheet. `AppModel` owns the re-scope: it re-lists
-    /// sessions for the new profile and drops the old transcript. The composer is not part
-    /// of that reset, so it is emptied here rather than carried onto another bot.
-    func selectBot(_ id: String) {
-        guard id != model.selectedBotID else { return }
-        model.draft = ""
-        Task { [weak self] in
-            await self?.model.selectBot(id)
-        }
     }
 
     // MARK: - Lifecycle
@@ -161,8 +116,8 @@ final class AppEnvironment: ObservableObject {
     func start() async {
         await syncCredentials()
         guard store.isPaired else { return }
+        isDisconnectedByUser = false
         await model.start()
-        await refreshModelLabel()
         await loadDevices()
         await model.refreshLatency()
     }
@@ -172,16 +127,16 @@ final class AppEnvironment: ObservableObject {
             isPairingPresented = true
             return
         }
+        isDisconnectedByUser = false
         await syncCredentials()
         // `retryConnection` keeps the open session selected across the reconnect.
         await model.retryConnection()
-        await refreshModelLabel()
         await loadDevices()
         await model.refreshLatency()
     }
 
-    /// After pairing the session list is empty until this runs; it is also the retry
-    /// path for a failed first connect.
+    /// The transport reads credentials at connect time, so they are mirrored here before
+    /// every connect; this is also the retry path for a first connect that failed.
     func syncCredentials() async {
         await box.update(host: store.host, token: store.refreshToken)
     }
@@ -212,8 +167,8 @@ final class AppEnvironment: ObservableObject {
             store.save(host: claim.host, refreshToken: claim.refreshToken)
             await box.update(host: claim.host, token: claim.refreshToken)
             Haptics.success()
+            isDisconnectedByUser = false
             await model.start()
-            await refreshModelLabel()
             await loadDevices()
             await model.refreshLatency()
             return true
@@ -231,8 +186,14 @@ final class AppEnvironment: ObservableObject {
         DeviceKey.forget()
         devices = []
         devicesError = nil
-        modelLabel = nil
-        isBotSwitcherPresented = false
+    }
+
+    /// Drop the socket but keep the pairing: the refresh token stays on this phone, so
+    /// `reconnect()` can bring the same host back without another QR code. Settings offers
+    /// this next to *Re-pair*, which is the action that replaces the credentials.
+    func disconnect() async {
+        isDisconnectedByUser = true
+        await model.stop()
     }
 
     func dismissPairingError() {
@@ -278,21 +239,6 @@ final class AppEnvironment: ObservableObject {
         }
     }
 
-    // MARK: - Discovery
-
-    /// The conversation header's model line. Failure is not fatal and is not surfaced: the
-    /// header simply omits the chip.
-    func refreshModelLabel() async {
-        do {
-            let options = try await client.modelOptions()
-            if let first = options.first {
-                modelLabel = first.label.isEmpty ? first.id : first.label
-            }
-        } catch {
-            modelLabel = nil
-        }
-    }
-
     // MARK: - Errors
 
     private func message(for error: Error) -> String {
@@ -304,19 +250,9 @@ final class AppEnvironment: ObservableObject {
     /// A fully paired, network-free environment. Screens preview against this and call
     /// `start()` in a `.task`, exactly as the app does.
     static func preview(paired: Bool = true,
-                        connected: Bool = true,
                         scenario: PreviewGatewayClient.Scenario = .sessions) -> AppEnvironment {
-        let environment = AppEnvironment(client: PreviewGatewayClient(scenario: scenario),
-                                         store: HostStore.preview(paired: paired),
-                                         bridge: PreviewBridgeService())
-        if connected {
-            environment.seedPreviewFacts()
-        }
-        return environment
-    }
-
-    /// The half of `start()`'s result that would otherwise need a live client.
-    private func seedPreviewFacts() {
-        modelLabel = "DeepSeek V4.1 Flash"
+        AppEnvironment(client: PreviewGatewayClient(scenario: scenario),
+                       store: HostStore.preview(paired: paired),
+                       bridge: PreviewBridgeService())
     }
 }

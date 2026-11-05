@@ -66,6 +66,94 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var streamingText: String = ""
     @Published public private(set) var isStreaming = false
 
+    /// The model's reasoning for the turn in flight, accumulated **separately** from the reply.
+    ///
+    /// `thinking.delta` is its own stream on the wire (`{"text"}` — plus an empty `{"text":""}`
+    /// heartbeat while the model is still deliberating) and never appears in `message.delta`.
+    /// Appending it to `streamingText` would print the model's notes inside the answer, which is
+    /// why it was dropped instead of merged; dropping it left reasoning invisible.
+    @Published public private(set) var reasoningText: String = ""
+
+    /// Tools called during the turn on screen, in the order they started.
+    ///
+    /// `tool.start` and `tool.complete` are separate events and a turn can be interrupted between
+    /// them, so a start with no matching complete stays `isRunning`. Rows survive
+    /// `message.complete`: the transcript the host sends back holds the turn's *messages*, not its
+    /// tool cards, so clearing here would empty the cards the instant the answer landed.
+    @Published public private(set) var liveTools: [LiveTool] = []
+
+    public struct LiveTool: Identifiable, Equatable {
+        /// `tool_id` from the wire — the identity `tool.complete` matches against.
+        public let id: String
+        public var name: String
+        public var input: String
+        public var output: String?
+        public var isRunning: Bool
+        public var durationMS: Int?
+
+        public init(id: String,
+                    name: String,
+                    input: String = "",
+                    output: String? = nil,
+                    isRunning: Bool = true,
+                    durationMS: Int? = nil) {
+            self.id = id
+            self.name = name
+            self.input = input
+            self.output = output
+            self.isRunning = isRunning
+            self.durationMS = durationMS
+        }
+    }
+
+    // MARK: Model and context
+
+    /// What the host says it is running, for the header chip.
+    ///
+    /// `model.options` names the running model at the top level (`model` + `provider`:
+    /// `deepseek-v4.1-flash` / `opencode-go`); `providers[0].models[0]` is only the first entry of
+    /// the menu, and on this host that is an Anthropic model the app was never using.
+    @Published public private(set) var modelLabel: String?
+
+    /// Tokens the context held after the last completed turn, and the window it is filling.
+    @Published public private(set) var contextUsed: Int?
+    @Published public private(set) var contextMax: Int?
+
+    /// A compaction is running on the host. It is a real model turn, so the UI shows a quiet note
+    /// rather than a spinner — and nothing may start a second one while it runs.
+    @Published public private(set) var isCompressing = false
+    /// One-line outcome of the last compaction, for the conversation header. Not an error, so it
+    /// does not go in `lastSendError`.
+    @Published public private(set) var compactionNotice: String?
+
+    // MARK: Preferences
+
+    /// Every one of these is persisted under its own key so the two apps and every window agree.
+    @Published public var showReasoning: Bool {
+        didSet { Self.defaults.set(showReasoning, forKey: Keys.showReasoning) }
+    }
+    @Published public var showToolOutput: Bool {
+        didSet { Self.defaults.set(showToolOutput, forKey: Keys.showToolOutput) }
+    }
+    /// Tokens at which a completed turn compacts the conversation. `0` disables it.
+    @Published public var autoCompactTokens: Int {
+        didSet { Self.defaults.set(autoCompactTokens, forKey: Keys.autoCompactTokens) }
+    }
+
+    /// 200k tokens: the point where a long conversation starts refusing turns, and early enough
+    /// that the summary still fits comfortably behind the reply.
+    public static let defaultAutoCompactTokens = 200_000
+
+    enum Keys {
+        static let showReasoning = "hermes.showReasoning"
+        static let showToolOutput = "hermes.showToolOutput"
+        static let autoCompactTokens = "hermes.autoCompactTokens"
+        /// One stored session id per bot — the endless-chat contract (`docs/ENDLESS-CHAT.md` §2).
+        static let endlessSessionPrefix = "hermes.endlessSession."
+    }
+
+    static let defaults = UserDefaults.standard
+
     // MARK: Questions the agent is blocked on
 
     @Published public private(set) var pendingRequests: [ServerRequest] = []
@@ -87,6 +175,13 @@ public final class AppModel: ObservableObject {
     public init(client: GatewayClientProtocol, hostName: String = "hermes") {
         self.client = client
         self.hostName = hostName
+        // A default only applies to a key nobody wrote: `defaults.bool(forKey:)` answers `false`
+        // for an unset key, which would ship reasoning and tool output hidden on first launch.
+        let defaults = Self.defaults
+        showReasoning = defaults.object(forKey: Keys.showReasoning) as? Bool ?? true
+        showToolOutput = defaults.object(forKey: Keys.showToolOutput) as? Bool ?? true
+        autoCompactTokens = defaults.object(forKey: Keys.autoCompactTokens) as? Int
+            ?? Self.defaultAutoCompactTokens
     }
 
     // MARK: Lifecycle
@@ -102,6 +197,7 @@ public final class AppModel: ObservableObject {
             connection = .connected
             await observeEvents()
             await loadBots()
+            await loadModelLabel()
             await loadSessions()
         } catch {
             connection = .failed(error.localizedDescription)
@@ -190,9 +286,14 @@ public final class AppModel: ObservableObject {
         sessions = []
         transcript = []
         streamingText = ""
+        reasoningText = ""
+        liveTools = []
         isStreaming = false
         runningSessions = []
         pendingRequests = []
+        contextUsed = nil
+        contextMax = nil
+        compactionNotice = nil
         sending = false
         lastSendError = nil
     }
@@ -201,7 +302,11 @@ public final class AppModel: ObservableObject {
         selectedSessionID = id
         transcript = []
         streamingText = ""
+        reasoningText = ""
+        liveTools = []
         isStreaming = false
+        contextUsed = nil
+        contextMax = nil
         pendingRequests = []
         // A resume that is still in flight when the bot (or the session) changes must not land:
         // it carries the transcript of the thing the user just left.
@@ -211,26 +316,29 @@ public final class AppModel: ObservableObject {
             guard epoch == botEpoch, selectedSessionID == id else { return }
             transcript = resumed.entries
             pendingRequests = resumed.openRequests
-            if let inflight = resumed.inflight, inflight.streaming {
-                streamingText = inflight.assistantText
-                isStreaming = true
-                runningSessions.insert(id)
-            } else {
-                // No turn is running on the host, so nothing more is coming: clear the streaming
-                // state even if this client thought it was mid-turn.
-                //
-                // The socket can close mid-turn (backgrounded app, tunnel blip) and the
-                // `message.complete` then lands while we are away. Without this branch the UI
-                // waited forever for an event that had already happened — observed as an app stuck
-                // on "thinking" with the finished reply never shown. A non-streaming inflight still
-                // carries its partial text, so keep that.
-                streamingText = resumed.inflight?.assistantText ?? ""
-                isStreaming = false
-                runningSessions.remove(id)
-            }
+            adopt(resumed, session: id)
         } catch {
             guard epoch == botEpoch, selectedSessionID == id else { return }
             connection = .failed("could not resume session: \(error.localizedDescription)")
+        }
+    }
+
+    /// Adopt the host's answer about the turn that was in flight.
+    ///
+    /// The resume is the authority, not this client's own flag: a turn that finished while the
+    /// socket was down leaves no `message.complete` to receive, so an app that kept streaming set
+    /// waited forever — observed as "stuck on Thinking…" with the finished reply on the host.
+    /// `inflight == nil` and `streaming: false` both mean nothing more is coming; a non-streaming
+    /// inflight still carries its partial text, so the bubble keeps what the model already wrote.
+    private func adopt(_ resumed: SessionResume, session: SessionID) {
+        streamingText = resumed.liveText
+        isStreaming = resumed.isStreaming
+        reasoningText = ""
+        liveTools = []
+        if resumed.isStreaming {
+            runningSessions.insert(session)
+        } else {
+            runningSessions.remove(session)
         }
     }
 
@@ -245,6 +353,9 @@ public final class AppModel: ObservableObject {
         let optimisticID = UUID().uuidString
         transcript.append(TranscriptEntry(id: optimisticID, role: .user, text: text))
         streamingText = ""
+        reasoningText = ""
+        liveTools = []
+        compactionNotice = nil
         isStreaming = true
         runningSessions.insert(sid)
         do {
@@ -289,6 +400,129 @@ public final class AppModel: ObservableObject {
         await start()
         if let previous, sessions.contains(where: { $0.id == previous }) {
             await select(previous)
+        }
+    }
+
+    // MARK: Endless conversation
+
+    /// The one conversation this bot has: resume it, or start and remember one.
+    ///
+    /// The product has no session list, so each bot owns exactly one stored id
+    /// (`hermes.endlessSession.<botID>`). A stored id stays resumable until the host forgets the
+    /// session: `4001` is "session not found" and `4007` is the same for an id from another profile,
+    /// and only those two justify opening a new conversation. Any other failure (a timeout, a dead
+    /// socket) is reported instead — starting a blank conversation over a transient error would
+    /// hide the user's history behind a new empty one.
+    public func endlessSession(for botID: String) async -> SessionID? {
+        if botID != selectedBotID {
+            // The transcript, tools and streaming state on screen belong to the bot being left.
+            resetForBotSwitch()
+            selectedBotID = botID
+        }
+        let key = Self.endlessKey(botID)
+        if let stored = Self.defaults.string(forKey: key), !stored.isEmpty {
+            do {
+                let resumed = try await client.resumeSession(stored)
+                selectedSessionID = stored
+                transcript = resumed.entries
+                pendingRequests = resumed.openRequests
+                adopt(resumed, session: stored)
+                return stored
+            } catch {
+                // Only a session the host has forgotten is worth replacing; a timeout or a dead
+                // socket must be reported, never papered over with a new empty conversation.
+                guard let gateway = error as? GatewayError, Self.isForgottenSession(gateway) else {
+                    lastSendError = "could not open the conversation: \(error.localizedDescription)"
+                    return nil
+                }
+            }
+        }
+        do {
+            // `createSession` answers with the **stored** id, which is what a later resume needs.
+            let created = try await client.createSession(model: nil, provider: nil, profile: botID)
+            Self.defaults.set(created, forKey: key)
+            await select(created)
+            return created
+        } catch {
+            lastSendError = "could not start a conversation: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Forget this bot's conversation so the next open starts a new one.
+    ///
+    /// Only the stored id is cleared: the session itself stays on the host, because deleting
+    /// history is not what "reset" on this screen means (and the host refuses to delete a session
+    /// it still holds live).
+    public func resetEndlessSession(for botID: String) {
+        let key = Self.endlessKey(botID)
+        let stored = Self.defaults.string(forKey: key)
+        Self.defaults.removeObject(forKey: key)
+        guard let stored, selectedSessionID == stored else { return }
+        // The conversation on screen is the one just forgotten: leaving its bubbles up would let
+        // the user keep typing into a session nothing will reopen.
+        selectedSessionID = nil
+        transcript = []
+        pendingRequests = []
+        streamingText = ""
+        reasoningText = ""
+        liveTools = []
+        isStreaming = false
+        contextUsed = nil
+        contextMax = nil
+        compactionNotice = nil
+        runningSessions.remove(stored)
+    }
+
+    // MARK: Compaction
+
+    /// Compact the open conversation now (the header's affordance and the automatic trigger).
+    ///
+    /// `session.compress` rewrites the stored transcript and answers with no messages, so the only
+    /// way to show the result is a fresh resume — hence the re-select, which also reconnects the
+    /// transcript to whatever the host decided to keep.
+    public func compressNow() async {
+        guard let sid = selectedSessionID, !isCompressing else { return }
+        isCompressing = true
+        defer { isCompressing = false }
+        do {
+            try await client.compress(session: sid)
+            compactionNotice = "conversation compacted"
+            await select(sid)
+        } catch {
+            lastSendError = "could not compact: \(error.localizedDescription)"
+        }
+    }
+
+    /// Compact once the host reports the context at (or past) the threshold.
+    ///
+    /// The threshold is in absolute tokens, from `usage.context_used` on `message.complete`; `0`
+    /// disables it. It is checked *after* a turn, never in a loop: a compaction cannot itself
+    /// complete a turn, and `isCompressing` refuses a second one while the first is running.
+    private func autoCompactIfNeeded() async {
+        guard autoCompactTokens > 0, !isCompressing,
+              let used = contextUsed, used >= autoCompactTokens
+        else { return }
+        await compressNow()
+    }
+
+    private static func endlessKey(_ botID: String) -> String {
+        Keys.endlessSessionPrefix + botID
+    }
+
+    private static func isForgottenSession(_ error: GatewayError) -> Bool {
+        guard let rpc = error.rpcError else { return false }
+        return rpc.code == 4001 || rpc.code == 4007
+    }
+
+    /// Read the host's current model for the header chip.
+    ///
+    /// Silent on failure: no chip is honest, a wrong model name is the bug this replaced.
+    private func loadModelLabel() async {
+        do {
+            modelLabel = try await client.modelCatalog().current?.label
+        } catch {
+            modelLabel = nil
         }
     }
 
@@ -341,6 +575,14 @@ public final class AppModel: ObservableObject {
 
     /// The turn is live or the submit is still in flight.
     public var isBusy: Bool { isStreaming || sending }
+
+    /// How full the context is, `0…1`, or `nil` until the host has reported both numbers.
+    /// The conversation header draws its gauge from this, so an unreported context is an absent
+    /// gauge rather than an empty one.
+    public var contextFraction: Double? {
+        guard let contextUsed, let contextMax, contextMax > 0 else { return nil }
+        return Double(contextUsed) / Double(contextMax)
+    }
 
     public func clearSendError() { lastSendError = nil }
 
@@ -451,15 +693,76 @@ public final class AppModel: ObservableObject {
             }
         case .messageDelta(let session, let text):
             guard session == selectedSessionID else { return }
+            beginLiveTurn()
             isStreaming = true
             runningSessions.insert(session)
             streamingText += text
+        case .thinkingDelta(let session, let text):
+            // Same stream discipline as the reply, a different destination: reasoning belongs
+            // beside the answer, never inside it. An empty `text` never reaches here (the decoder
+            // drops the heartbeat), so accumulated reasoning is only ever *added* to.
+            guard session == selectedSessionID else { return }
+            beginLiveTurn()
+            isStreaming = true
+            runningSessions.insert(session)
+            reasoningText += text
         case .messageComplete(let session, let text):
             guard session == selectedSessionID else { return }
-            transcript.append(TranscriptEntry(id: UUID().uuidString, role: .assistant, text: text))
+            // A completion with no text would otherwise leave a blank bubble beside the streamed
+            // one; the deltas already hold the reply.
+            let finalText = text.isEmpty ? streamingText : text
+            if !finalText.isEmpty {
+                transcript.append(TranscriptEntry(id: UUID().uuidString, role: .assistant, text: finalText))
+            }
             streamingText = ""
             isStreaming = false
+            reasoningText = ""
             runningSessions.remove(session)
+            // Not awaited: compaction is a model turn that can take minutes, and parking this loop
+            // would hold back every later delta, approval and tool event behind it.
+            Task { await self.autoCompactIfNeeded() }
+        case .contextUsage(let session, let used, let max, _):
+            guard session == selectedSessionID else { return }
+            contextUsed = used
+            // A host that omits `context_max` must not turn the gauge into "100%".
+            if max > 0 { contextMax = max }
+        case .toolStart(let session, let name, let callID, let input):
+            guard session == selectedSessionID else { return }
+            beginLiveTurn()
+            isStreaming = true
+            runningSessions.insert(session)
+            // The card's label is the wire's `name`; the old projection rendered the literal word
+            // "tool" for every call. An unnamed call is said to be unknown rather than mislabelled.
+            let resolved = name.isEmpty ? "unknown tool" : name
+            if let index = liveTools.firstIndex(where: { $0.id == callID }) {
+                liveTools[index].name = resolved
+                liveTools[index].input = input
+                liveTools[index].isRunning = true
+            } else {
+                liveTools.append(LiveTool(id: callID, name: resolved, input: input))
+            }
+        case .toolProgress(let session, let callID, let text):
+            guard session == selectedSessionID else { return }
+            if let index = liveTools.firstIndex(where: { $0.id == callID }) {
+                liveTools[index].output = text
+            }
+        case .toolComplete(let session, let name, let callID, let output, _, let durationMS):
+            guard session == selectedSessionID else { return }
+            if let index = liveTools.firstIndex(where: { $0.id == callID }) {
+                if let name, !name.isEmpty { liveTools[index].name = name }
+                liveTools[index].output = output
+                liveTools[index].isRunning = false
+                liveTools[index].durationMS = durationMS
+            } else {
+                // A completion whose start this client never saw — a replayed event, or a tool
+                // that began before the socket reattached — still deserves a row with its name.
+                let resolved = (name?.isEmpty == false ? name : nil) ?? "unknown tool"
+                liveTools.append(LiveTool(id: callID,
+                                          name: resolved,
+                                          output: output,
+                                          isRunning: false,
+                                          durationMS: durationMS))
+            }
         case .request(let request):
             // A question about a session the user is not looking at would sit under the wrong
             // conversation. Only filtered when we can tell: a request that names no session (or
@@ -478,9 +781,16 @@ public final class AppModel: ObservableObject {
             await loadSessions()
         case .error(_, let message):
             lastSendError = message
-        case .toolStart, .toolProgress, .toolComplete, .unknown:
-            break // tool cards are rendered from the transcript projection (M1)
+        case .unknown:
+            break
         }
+    }
+
+    /// A new turn is starting: the previous turn's tool cards described a turn the transcript now
+    /// holds as messages, so they would otherwise accumulate across turns.
+    private func beginLiveTurn() {
+        guard !isStreaming else { return }
+        liveTools = []
     }
 }
 
@@ -531,11 +841,24 @@ public final class PreviewGatewayClient: GatewayClientProtocol, @unchecked Senda
             continuation.yield(.state(.reconnecting(attempt: 2)))
         case .streaming:
             Task {
+                // Everything is deferred past the shell's first selection: a delta for a session
+                // that is not selected yet is dropped by `AppModel`, which is the correct
+                // behaviour and would make this preview look inert.
+                let act: (ClientEvent) -> Void = { continuation.yield($0) }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                act(.thinkingDelta(session: "preview-1",
+                                   text: "The vault is 1.2 GB, so the first snapshot is the expensive one."))
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                act(.toolStart(session: "preview-1", name: "bash", callID: "preview-tool-1",
+                               input: "rsync -a --delete ~/vault/ ~/backup/vault/"))
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                act(.toolComplete(session: "preview-1", name: "bash", callID: "preview-tool-1",
+                                  output: "sent 1,204 files · 1.2G · exit 0", ok: true, durationMS: 800))
                 for chunk in ["Snapshotting the vault first, ",
                               "then I'll diff the docs tree.\n\n",
                               "```sh\nrsync -a --delete ~/vault/ ~/backup/vault/\n```"] {
                     try? await Task.sleep(nanoseconds: 450_000_000)
-                    continuation.yield(.messageDelta(session: "preview-1", text: chunk))
+                    act(.messageDelta(session: "preview-1", text: chunk))
                 }
             }
         case .approval:
@@ -639,8 +962,22 @@ public final class PreviewGatewayClient: GatewayClientProtocol, @unchecked Senda
     public func interrupt(session: SessionID) async throws {}
     public func rewind(session: SessionID, toRowID: Int64, then text: String) async throws {}
     public func modelOptions() async throws -> [ModelOption] {
-        [ModelOption(id: "deepseek-v4.1-flash", provider: "opencode-go", label: "DeepSeek V4.1 Flash")]
+        [ModelOption(id: "deepseek-v4.1-flash", provider: "opencode-go", label: "deepseek-v4.1-flash")]
     }
+
+    /// The chip reads `current`, so a preview shows the same model the real host does.
+    public func modelCatalog() async throws -> ModelCatalog {
+        let option = ModelOption(id: "deepseek-v4.1-flash", provider: "opencode-go",
+                                 label: "deepseek-v4.1-flash")
+        return ModelCatalog(current: option, options: [
+            ModelOption(id: "claude-fable", provider: "anthropic", label: "claude-fable"),
+            option,
+        ])
+    }
+
+    /// Previews have no host to compact; answering is enough for the header's notice to render.
+    public func compress(session: SessionID) async throws {}
+
     public func answer(_ request: ServerRequestID, with result: JSONValue) async throws {}
     public func decline(_ request: ServerRequestID, with error: RPCError) async throws {}
 }

@@ -71,15 +71,20 @@ public actor GatewayClient: GatewayClientProtocol {
         public var sessionList: TimeInterval
         public var sessionResume: TimeInterval
         public var handshake: TimeInterval
+        /// `session.compress` is a real model turn on the host (write a summary of the session), so
+        /// it is bounded like a resume rather than like a bookkeeping call.
+        public var compress: TimeInterval
 
         public init(call: TimeInterval = 30,
                     sessionList: TimeInterval = 120,
                     sessionResume: TimeInterval = 120,
-                    handshake: TimeInterval = 20) {
+                    handshake: TimeInterval = 20,
+                    compress: TimeInterval = 120) {
             self.call = call
             self.sessionList = sessionList
             self.sessionResume = sessionResume
             self.handshake = handshake
+            self.compress = compress
         }
     }
 
@@ -364,6 +369,24 @@ public actor GatewayClient: GatewayClientProtocol {
         return try GatewayPayloadDecoder.modelOptions(result)
     }
 
+    public func modelCatalog() async throws -> ModelCatalog {
+        let result = try await perform("model.options", params: .object([:]), timeout: timeouts.call)
+        return try GatewayPayloadDecoder.modelCatalog(result)
+    }
+
+    // MARK: Compaction
+
+    /// `session.compress` with the **runtime** id.
+    ///
+    /// The host addresses a live session by the id `session.resume` handed back; a stored id is
+    /// refused with `4001` even on a healthy socket (the same translation `prompt.submit` needs).
+    /// The reply carries no transcript, so the caller re-resumes to see the compacted history.
+    public func compress(session: SessionID) async throws {
+        _ = try await perform("session.compress",
+                              params: .object(["session_id": .string(addressableID(session))]),
+                              timeout: timeouts.compress)
+    }
+
     // MARK: Server → client requests
 
     public func answer(_ request: ServerRequestID, with result: JSONValue) async throws {
@@ -596,8 +619,8 @@ public actor GatewayClient: GatewayClientProtocol {
             return
         }
 
-        if let event = GatewayEventDecoder.event(type: type, session: session, payload: payload) {
-            yield(event)
+        if let events = GatewayEventDecoder.events(type: type, session: session, payload: payload) {
+            for event in events { yield(event) }
         } else {
             yield(.unknown(type: type, payload: payload))
         }

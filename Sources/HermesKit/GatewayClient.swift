@@ -63,6 +63,21 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
     // Discovery
     func modelOptions() async throws -> [ModelOption]
 
+    /// `model.options` as the host answered it: the catalogue **and** which entry is current.
+    ///
+    /// The catalogue alone cannot say what the app is talking to — the reply names it in
+    /// `model` + `provider`, and the first catalogue entry is just the first provider's first
+    /// model (measured: `anthropic/claude-fable`, while the live turn ran `deepseek-v4.1-flash`
+    /// on `opencode-go`). Reading `providers[0].models[0]` is what put the wrong chip on screen.
+    func modelCatalog() async throws -> ModelCatalog
+
+    // Compaction
+    /// `session.compress` — ask the host to summarise the session into a smaller context.
+    ///
+    /// `session_id` must be the **runtime** id (`GatewayClient` translates a stored id), and the
+    /// call is slow by nature: the host runs a real model turn to write the summary.
+    func compress(session: SessionID) async throws
+
     /// Answer a request the gateway sent us (approval, clarify, sudo, secret…).
     func answer(_ request: ServerRequestID, with result: JSONValue) async throws
     func decline(_ request: ServerRequestID, with error: RPCError) async throws
@@ -170,6 +185,18 @@ public struct SessionResume: Sendable {
         self.inflight = inflight
         self.openRequests = openRequests
     }
+
+    /// Whether a turn is *still running* on the host, as the resume reported it.
+    ///
+    /// This is the authority the UI has to adopt after a resume: a turn that finished while the
+    /// socket was down leaves no `message.complete` for us to receive, so a client that keeps its
+    /// own streaming flag sits on "Thinking…" forever. `inflight` nil (nothing running) and
+    /// `streaming: false` (a finished-but-unflushed turn) both mean "nothing more is coming".
+    public var isStreaming: Bool { inflight?.streaming == true }
+
+    /// The partial assistant text worth keeping when `isStreaming` is false — a turn that settled
+    /// unattended still wrote something, and dropping it would blank the last bubble.
+    public var liveText: String { inflight?.assistantText ?? "" }
 }
 
 public struct InflightTurn: Sendable {
@@ -213,6 +240,24 @@ public struct ModelOption: Identifiable, Hashable, Sendable {
     }
 }
 
+/// What `model.options` actually answers: everything the host can run, plus the one it *is*
+/// running.
+///
+/// Measured body: `{"providers":[{"slug":"anthropic","models":["claude-fable",…]}, …],
+/// "model":"deepseek-v4.1-flash", "provider":"opencode-go"}`. The top-level pair is the answer to
+/// "what am I talking to"; `providers[].models[]` is a menu, in host order, and its first entry is
+/// not the current model.
+public struct ModelCatalog: Equatable, Sendable {
+    /// The model the next turn will use. `nil` when the host did not name one.
+    public let current: ModelOption?
+    public let options: [ModelOption]
+
+    public init(current: ModelOption?, options: [ModelOption]) {
+        self.current = current
+        self.options = options
+    }
+}
+
 /// A request the *gateway* sends the client and blocks on.
 public struct ServerRequest: Identifiable, Sendable {
     public let id: ServerRequestID
@@ -234,9 +279,16 @@ public enum ClientEvent: Sendable {
     case state(TransportState)
     case messageDelta(session: SessionID, text: String)
     case messageComplete(session: SessionID, text: String)
-    case toolStart(session: SessionID, name: String, callID: String, input: JSONValue?)
+    /// The model's reasoning, a stream of its own: `thinking.delta` arrives *without*
+    /// `message.delta` text and with an empty `text` heartbeat. Mixing it into the reply would
+    /// show the model thinking out loud in the answer bubble.
+    case thinkingDelta(session: SessionID, text: String)
+    case toolStart(session: SessionID, name: String, callID: String, input: String)
     case toolProgress(session: SessionID, callID: String, text: String)
-    case toolComplete(session: SessionID, callID: String, output: String?, ok: Bool, durationMS: Int?)
+    case toolComplete(session: SessionID, name: String?, callID: String, output: String?, ok: Bool, durationMS: Int?)
+    /// `message.complete`'s `usage`: how full the context is. `percent` is the host's own rounded
+    /// figure when it sent one.
+    case contextUsage(session: SessionID, used: Int, max: Int, percent: Double?)
     case request(ServerRequest)
     case requestCancelled(id: ServerRequestID, reason: String?)
     case sessionUpdated(SessionID)
@@ -268,5 +320,17 @@ public extension GatewayClientProtocol {
     /// A client that *can* scope must implement the profile-aware overload.
     func createSession(model: String?, provider: String?, profile: String?) async throws -> SessionID {
         try await createSession(model: model, provider: provider)
+    }
+
+    /// A client that cannot tell which model is current only has its menu. Reported as "no current
+    /// model" rather than guessing `options.first` — guessing is the chip bug.
+    func modelCatalog() async throws -> ModelCatalog {
+        ModelCatalog(current: nil, options: try await modelOptions())
+    }
+
+    /// Compaction is a host capability this build may not have (an unpaired client has no host at
+    /// all). Failing honestly keeps "compacted" from being shown over a transcript nothing touched.
+    func compress(session: SessionID) async throws {
+        throw GatewayError.notConnected
     }
 }
