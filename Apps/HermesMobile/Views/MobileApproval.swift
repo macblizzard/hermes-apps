@@ -113,9 +113,9 @@ struct MobilePendingRequestCard: View {
                              why: presentation.reason,
                              scope: presentation.scope,
                              status: .pending,
-                             // An approval result on this gateway is `{"approved": Bool}`:
-                             // there is no "remember this" bit to set, so the card must not
-                             // offer one.
+                             // The gateway's own `choices` decide which buttons exist
+                             // (`fixtures/NOTES.md` §6); the card must not invent an
+                             // "Always" the host did not offer.
                              allowsAlways: false) { decision in
                     Haptics.selection()
                     answer(decision)
@@ -150,7 +150,13 @@ struct MobilePendingRequestCard: View {
     }
 
     private func answer(_ decision: ApprovalCard.Decision) {
-        Task { await model.approve(request, allowed: decision != .denied) }
+        Task {
+            if decision == .denied {
+                await model.deny(request)
+            } else {
+                await model.approve(request)
+            }
+        }
     }
 }
 
@@ -324,7 +330,11 @@ struct MobileApprovalSheet: View {
         pendingDecision = decision
         Haptics.selection()
         Task {
-            await model.approve(request, allowed: decision != .denied)
+            if decision == .denied {
+                await model.deny(request)
+            } else {
+                await model.approve(request)
+            }
             pendingDecision = nil
             dismiss()
         }

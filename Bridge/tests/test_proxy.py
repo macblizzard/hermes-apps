@@ -1,4 +1,9 @@
 from __future__ import annotations
+# NOTE: approval answers are `{"choice": <token>, "all": bool}`, taken from the stock the
+# host offers in `params.choices` -- verified in tui_gateway/server.py::_emit_approval_request
+# (`choice = str(result.get("choice") or "deny")`). This bridge relays the client's result
+# opaquely, so these fixtures exist to keep the *app* honest: a `{"approved": true}` body is
+# silently read as a deny by Hermes, which is the bug these tests guard against.
 
 import asyncio
 import json
@@ -174,7 +179,7 @@ def test_approval_server_request_round_trips(bridge, fake_gateway):
             assert request["method"] == "approval"
 
             await ws.send(
-                json.dumps({"jsonrpc": "2.0", "id": "srq-7", "result": {"approved": True}})
+                json.dumps({"jsonrpc": "2.0", "id": "srq-7", "result": {"choice": "once"}})
                 + "\n"
             )
 
@@ -183,7 +188,7 @@ def test_approval_server_request_round_trips(bridge, fake_gateway):
     routed = fake_gateway.wait_for(
         lambda f: "method" not in f and f.get("id") == "srq-7"
     )
-    assert routed["result"] == {"approved": True}
+    assert routed["result"] == {"choice": "once"}
     assert bridge.audit.last("server_request")["method"] == "approval"
     assert bridge.audit.last("server_response")["method"] == "approval"
 
@@ -255,7 +260,7 @@ def test_server_request_id_collision_is_remapped_and_restored(bridge, fake_gatew
             assert request["method"] == "approval"
 
             await ws.send(
-                json.dumps({"jsonrpc": "2.0", "id": "brq-1", "result": {"approved": False}})
+                json.dumps({"jsonrpc": "2.0", "id": "brq-1", "result": {"choice": "deny"}})
                 + "\n"
             )
             # The gateway's own pending ping still answers under its own id.
@@ -266,7 +271,7 @@ def test_server_request_id_collision_is_remapped_and_restored(bridge, fake_gatew
     asyncio.run(scenario())
 
     routed = fake_gateway.wait_for(lambda f: "method" not in f and f.get("id") == 5)
-    assert routed["result"] == {"approved": False}
+    assert routed["result"] == {"choice": "deny"}
 
 
 def test_notifications_are_relayed_in_order_and_split_from_batches(bridge, fake_gateway):
@@ -340,14 +345,14 @@ def test_client_request_cannot_reuse_a_pending_server_request_id(bridge, fake_ga
             assert "in use" in error["error"]["message"]
 
             await ws.send(
-                json.dumps({"jsonrpc": "2.0", "id": "srq-21", "result": {"approved": True}})
+                json.dumps({"jsonrpc": "2.0", "id": "srq-21", "result": {"choice": "once"}})
                 + "\n"
             )
 
     asyncio.run(scenario())
 
     routed = fake_gateway.wait_for(lambda f: "method" not in f and f.get("id") == "srq-21")
-    assert routed["result"] == {"approved": True}
+    assert routed["result"] == {"choice": "once"}
     assert "ping" not in fake_gateway.methods()
     assert bridge.audit.last("client_request_rejected")["reason"] == "id_in_use"
 

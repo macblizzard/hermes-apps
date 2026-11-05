@@ -193,9 +193,17 @@ final class WorkspaceStore: ObservableObject {
 
     // MARK: Approvals
 
-    func approve(_ request: ServerRequest, allowed: Bool) {
+    func approve(_ request: ServerRequest) {
         Task { [weak self] in
-            await self?.model.approve(request, allowed: allowed)
+            await self?.model.approve(request)
+        }
+    }
+
+    /// Deny is an explicit `deny` choice, never a `-32601`: the latter tells the gateway this
+    /// client cannot answer at all, and the agent is told nobody refused.
+    func deny(_ request: ServerRequest) {
+        Task { [weak self] in
+            await self?.model.deny(request)
         }
     }
 

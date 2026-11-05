@@ -239,23 +239,58 @@ public final class AppModel: ObservableObject {
         pendingRequests.removeAll { $0.id == request.id }
     }
 
+    /// Refuse a request the client cannot render *at all*.
+    ///
+    /// This sends JSON-RPC `-32601`, and Hermes deliberately reads that as "no client here can
+    /// answer this" — it *withdraws* the queued approval and tells the agent to update the app.
+    /// It is NOT a denial: nothing was refused. Use `deny(_:)` when the user pressed Deny.
     public func decline(_ request: ServerRequest) async {
         try? await client.decline(request.id, with: .methodNotFound)
         pendingRequests.removeAll { $0.id == request.id }
     }
 
-    /// Answer an approval in the shape the gateway actually records.
+    // MARK: Answering an approval
+
+    /// The tokens the host offers for this request, in the host's own order.
     ///
-    /// `answer(_:choice:)` is the generic "pick one" door, but an approval result on the
-    /// wire is `{"approved": Bool}` — `Bridge/tests/test_proxy.py` forwards the app's
-    /// result under the gateway's original id unchanged, and the recorded body is
-    /// `{"approved": true}`. Denying is an answer, not a `-32601`: `decline` tells the
-    /// gateway *this client cannot render the request at all*, which makes the tool fail
-    /// fast. A user pressing Deny said something different.
-    public func approve(_ request: ServerRequest, allowed: Bool) async {
-        try? await client.answer(request.id, with: .object(["approved": .bool(allowed)]))
+    /// `tui_gateway/server.py::_approval_request_payload` computes `choices` as `["once"]`,
+    /// plus `"session"` unless `smart_denied`/`allow_session is False`, plus `"always"` unless
+    /// `allow_permanent is False`, then always `"deny"`. The client renders exactly these: a
+    /// smart-denied command legitimately arrives with only `["once","deny"]`.
+    public static func choices(for request: ServerRequest) -> [String] {
+        guard case .array(let values)? = request.params["choices"] else { return [] }
+        return values.compactMap { $0.stringValue }
+    }
+
+    /// Answer with one of `choices(for:)`.
+    ///
+    /// The wire shape is `{"choice": <token>, "all": <bool>}` — verified in
+    /// `tui_gateway/server.py::_emit_approval_request`, which does
+    /// `choice = str(result.get("choice") or "deny")`. Any other key is ignored, so a client
+    /// that sends `{"approved": true}` is read as a **deny**. That is why this method takes a
+    /// token rather than a boolean.
+    public func respond(_ request: ServerRequest, choice: String, all: Bool = false) async {
+        let params: JSONValue = .object([
+            "choice": .string(choice),
+            "all": .bool(all),
+        ])
+        try? await client.answer(request.id, with: params)
         pendingRequests.removeAll { $0.id == request.id }
     }
+
+    /// Allow, in the strongest form the host offered (`once` by default).
+    public func approve(_ request: ServerRequest) async {
+        let offered = Self.choices(for: request)
+        let choice = offered.first { $0 == "once" } ?? offered.first ?? "once"
+        await respond(request, choice: choice)
+    }
+
+    /// Refuse. An explicit `deny` token, never `-32601`: the user said no, and the agent must
+    /// be told no rather than "this client cannot answer".
+    public func deny(_ request: ServerRequest) async {
+        await respond(request, choice: "deny")
+    }
+
 
     // MARK: Events
 

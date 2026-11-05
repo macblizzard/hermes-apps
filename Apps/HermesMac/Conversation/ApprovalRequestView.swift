@@ -46,9 +46,9 @@ struct ApprovalRequestView: View {
                      onAnswer: { decision in
                          switch decision {
                          case .once, .always:
-                             store.approve(request, allowed: true)
+                             store.approve(request)
                          case .denied:
-                             store.approve(request, allowed: false)
+                             store.deny(request)
                          }
                      })
     }
