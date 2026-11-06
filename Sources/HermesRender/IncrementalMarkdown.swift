@@ -1,4 +1,5 @@
 import Foundation
+import HermesKit
 
 /// Incremental markdown for a streaming chat.
 ///
@@ -12,6 +13,20 @@ public enum Block: Equatable, Sendable {
     case code(language: String?, body: String, closed: Bool)
     case quote(String)
     case rule
+    /// A GitHub-style pipe table, already split into cells by `MarkdownTableParser`.
+    case table(MarkdownTable)
+}
+
+public extension Block {
+    /// Prose the reader may want to select: everything that is plain sentences and
+    /// list items. Code, tables and rules are drawn as their own views, and a quote
+    /// keeps its accent bar, so all three stay out of a selectable prose run.
+    var isProse: Bool {
+        switch self {
+        case .paragraph, .heading, .bullet, .numbered: return true
+        case .code, .table, .quote, .rule: return false
+        }
+    }
 }
 
 public struct IncrementalMarkdown: Sendable {
@@ -33,8 +48,10 @@ public struct IncrementalMarkdown: Sendable {
     /// Append a streamed delta and return only the blocks that changed.
     /// Block identity is by index, so the UI can diff cheaply.
     ///
-    /// Only the final block is re-parsed: a delta can extend the block it lands
-    /// in, or start new ones after it, but it can never rewrite an earlier block.
+    /// Normally only the final block is re-parsed: a delta can extend the block it
+    /// lands in, or start new ones after it. A table is the exception — the
+    /// paragraph after it can still turn into one of its rows — so the live region
+    /// is whatever `parseDetail` says it is, and everything before that is stable.
     @discardableResult
     public mutating func append(_ delta: String) -> [Int] {
         guard !delta.isEmpty else { return [] }
@@ -57,8 +74,8 @@ public struct IncrementalMarkdown: Sendable {
             stableBlocks = newBlocks
             tailOffset = nil
         } else {
-            stableBlocks = Array(newBlocks.dropLast())
-            tailOffset = (tailOffset ?? 0) + parsed.lastBlockStart
+            stableBlocks.append(contentsOf: parsed.blocks.prefix(parsed.stableBlockCount))
+            tailOffset = (tailOffset ?? 0) + parsed.liveStart
         }
         return changed
     }
@@ -67,20 +84,29 @@ public struct IncrementalMarkdown: Sendable {
         parseDetail(text).blocks
     }
 
-    /// Parse a whole text and report where its last block starts (UTF-8 offset),
-    /// which is the only region `append` has to look at again.
-    static func parseDetail(_ text: String) -> (blocks: [Block], lastBlockStart: Int) {
+    /// Parse a whole text and report the region `append` has to look at again:
+    /// the UTF-8 offset where it starts and how many leading blocks are final.
+    ///
+    /// Everything after `stableBlockCount` is live. That is usually just the last
+    /// block, but a paragraph directly under a table may still become a row of it,
+    /// so the table is kept live too.
+    static func parseDetail(_ text: String)
+        -> (blocks: [Block], liveStart: Int, stableBlockCount: Int) {
+        let lines = splitLines(text)
+        let rawLines = lines.map { $0.text }
         var blocks: [Block] = []
-        var lastBlockStart = 0
+        var blockStarts: [Int] = []
         var paragraph: [String] = []
         var paragraphStart = 0
-        var offset = 0
-        var i = text.startIndex
+
+        func append(_ block: Block, at offset: Int) {
+            blocks.append(block)
+            blockStarts.append(offset)
+        }
 
         func flushParagraph() {
             guard !paragraph.isEmpty else { return }
-            blocks.append(.paragraph(paragraph.joined(separator: "\n")))
-            lastBlockStart = paragraphStart
+            append(.paragraph(paragraph.joined(separator: "\n")), at: paragraphStart)
             paragraph.removeAll()
         }
 
@@ -88,12 +114,11 @@ public struct IncrementalMarkdown: Sendable {
             if paragraph.isEmpty { paragraphStart = lineOffset }
         }
 
-        while i < text.endIndex {
-            let lineEnd = text[i...].firstIndex(of: "\n") ?? text.endIndex
-            var line = String(text[i..<lineEnd])
-            let lineOffset = offset
-            offset += line.utf8.count + (lineEnd == text.endIndex ? 0 : 1)
-            let next = lineEnd == text.endIndex ? text.endIndex : text.index(after: lineEnd)
+        var index = 0
+        while index < lines.count {
+            let lineOffset = lines[index].offset
+            var line = lines[index].text
+            index += 1
 
             // Fenced code: everything until the closing fence, or to the end while it
             // is still streaming (that is why `closed` exists).
@@ -102,24 +127,28 @@ public struct IncrementalMarkdown: Sendable {
                 let language = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 var body = ""
                 var closed = false
-                i = next
-                while i < text.endIndex {
-                    let end = text[i...].firstIndex(of: "\n") ?? text.endIndex
-                    let inner = String(text[i..<end])
-                    let after = end == text.endIndex ? text.endIndex : text.index(after: end)
-                    offset += inner.utf8.count + (end == text.endIndex ? 0 : 1)
-                    if inner.hasPrefix("```") { closed = true; i = after; break }
+                while index < lines.count {
+                    let inner = lines[index].text
+                    index += 1
+                    if inner.hasPrefix("```") { closed = true; break }
                     body += (body.isEmpty ? "" : "\n") + inner
-                    i = after
                 }
-                blocks.append(.code(language: language.isEmpty ? nil : language, body: body, closed: closed))
-                lastBlockStart = lineOffset
+                append(.code(language: language.isEmpty ? nil : language, body: body, closed: closed),
+                       at: lineOffset)
                 continue
             }
 
             if line.trimmingCharacters(in: .whitespaces).isEmpty {
                 flushParagraph()
-                i = next
+                continue
+            }
+
+            // A table is decided by the delimiter row under the header, so the check
+            // has to run before the line is folded into a paragraph.
+            if let (table, consumed) = MarkdownTableParser.parse(lines: rawLines, startingAt: index - 1) {
+                flushParagraph()
+                append(.table(table), at: lineOffset)
+                index += consumed - 1
                 continue
             }
 
@@ -127,51 +156,73 @@ public struct IncrementalMarkdown: Sendable {
                 flushParagraph()
                 let level = line.prefix(while: { $0 == "#" }).count
                 let title = line.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces)
-                blocks.append(.heading(level: min(level, 6), text: title))
-                lastBlockStart = lineOffset
-                i = next
+                append(.heading(level: min(level, 6), text: title), at: lineOffset)
                 continue
             }
 
             if line.hasPrefix("> ") {
                 flushParagraph()
-                blocks.append(.quote(String(line.dropFirst(2))))
-                lastBlockStart = lineOffset
-                i = next
+                append(.quote(String(line.dropFirst(2))), at: lineOffset)
                 continue
             }
 
             if line == "---" || line == "***" {
                 flushParagraph()
-                blocks.append(.rule)
-                lastBlockStart = lineOffset
-                i = next
+                append(.rule, at: lineOffset)
                 continue
             }
 
             if line.hasPrefix("- ") || line.hasPrefix("* ") {
                 flushParagraph()
-                blocks.append(.bullet(String(line.dropFirst(2))))
-                lastBlockStart = lineOffset
-                i = next
+                append(.bullet(String(line.dropFirst(2))), at: lineOffset)
                 continue
             }
 
             if let numbered = IncrementalMarkdown.numberedLine(line) {
                 flushParagraph()
-                blocks.append(.numbered(index: numbered.0, text: numbered.1))
-                lastBlockStart = lineOffset
-                i = next
+                append(.numbered(index: numbered.0, text: numbered.1), at: lineOffset)
                 continue
             }
 
             line = line.trimmingCharacters(in: .whitespaces)
             beginParagraph(at: lineOffset)
             paragraph.append(line)
-            i = next
         }
         flushParagraph()
-        return (blocks, lastBlockStart)
+
+        var liveIndex = max(blocks.count - 1, 0)
+        if blocks.count >= 2,
+           case .table = blocks[blocks.count - 2],
+           case .paragraph = blocks[blocks.count - 1] {
+            // The line under a table is not prose yet: without outer pipes, the
+            // next token can still turn it into a row of that table.
+            liveIndex -= 1
+        }
+        if liveIndex > 0, let lastLine = rawLines.last,
+           MarkdownTableParser.isDelimiterRowPrefix(lastLine) {
+            // A line of dashes is a rule now and a table's delimiter row one
+            // keystroke later; without the line above it, that can never re-parse.
+            liveIndex -= 1
+        }
+        return (blocks,
+                blockStarts.indices.contains(liveIndex) ? blockStarts[liveIndex] : 0,
+                liveIndex)
+    }
+
+    /// Lines with the UTF-8 offset of each line's first byte, which is what
+    /// `append` uses to restart parsing at a block boundary.
+    static func splitLines(_ text: String) -> [(text: String, offset: Int)] {
+        var lines: [(text: String, offset: Int)] = []
+        var offset = 0
+        var start = text.startIndex
+        while start < text.endIndex {
+            let end = text[start...].firstIndex(of: "\n") ?? text.endIndex
+            let line = String(text[start..<end])
+            lines.append((line, offset))
+            offset += line.utf8.count + (end == text.endIndex ? 0 : 1)
+            start = end == text.endIndex ? text.endIndex : text.index(after: end)
+        }
+        return lines
     }
 
     static func numberedLine(_ line: String) -> (Int, String)? {

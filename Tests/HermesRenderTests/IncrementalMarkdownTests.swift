@@ -99,6 +99,95 @@ final class IncrementalMarkdownTests: XCTestCase {
         XCTAssertEqual(md.blocks, IncrementalMarkdown.parse(md.source))
     }
 
+    // MARK: Tables
+
+    func testTableBecomesOneBlockAndTheProseAfterItStaysProse() {
+        let blocks = IncrementalMarkdown.parse("""
+        | File | Status |
+        | --- | --- |
+        | a.md | new |
+        After the table.
+        """)
+
+        guard blocks.count == 2, case .table(let table) = blocks[0] else {
+            return XCTFail("expected a table block followed by a paragraph, got \(blocks)")
+        }
+        XCTAssertEqual(table.header, ["File", "Status"])
+        XCTAssertEqual(table.rows, [["a.md", "new"]])
+        XCTAssertEqual(blocks[1], .paragraph("After the table."))
+    }
+
+    func testTableOnlyFormsWhenTheDelimiterRowArrives() {
+        var md = IncrementalMarkdown()
+        md.append("| a | b |\n")
+        XCTAssertEqual(md.blocks, [.paragraph("| a | b |")],
+                       "a header alone is still just a sentence with pipes")
+
+        md.append("| --- | --- |\n")
+        guard md.blocks.count == 1, case .table(let table) = md.blocks[0] else {
+            return XCTFail("expected the delimiter row to turn the line into a table, got \(md.blocks)")
+        }
+        XCTAssertEqual(table.header, ["a", "b"])
+        XCTAssertEqual(table.rows, [])
+    }
+
+    func testStreamedTableMatchesAFullParse() {
+        let document = """
+        Before the table:
+
+        | Name | Note |
+        | :--- | ---: |
+        | `a | b` | left \\| right |
+        | short |
+
+        After the table.
+        """
+        var md = IncrementalMarkdown()
+        var index = document.startIndex
+        while index < document.endIndex {
+            let end = document.index(index, offsetBy: 3, limitedBy: document.endIndex) ?? document.endIndex
+            md.append(String(document[index..<end]))
+            XCTAssertEqual(md.blocks, IncrementalMarkdown.parse(md.source),
+                           "split at \(document.distance(from: document.startIndex, to: end))")
+            index = end
+        }
+
+        XCTAssertEqual(md.blocks.count, 3)
+        guard case .table(let table) = md.blocks[1] else { return XCTFail() }
+        XCTAssertEqual(table.alignments, [.leading, .trailing])
+        XCTAssertEqual(table.rows, [["`a | b`", "left | right"], ["short", ""]])
+    }
+
+    func testStreamedTableWithoutOuterPipesMatchesAFullParse() {
+        let document = """
+        Status | Meaning
+        --- | ---
+        ok | fine
+        fail | broken
+        """
+        var md = IncrementalMarkdown()
+        // One character at a time: every partial row ("o", "ok", "ok |") must parse
+        // the same as a full re-parse of what has arrived.
+        for character in document {
+            md.append(String(character))
+            XCTAssertEqual(md.blocks, IncrementalMarkdown.parse(md.source),
+                           "after \(md.source.debugDescription)")
+        }
+        guard md.blocks.count == 1, case .table(let table) = md.blocks[0] else {
+            return XCTFail("expected one table block, got \(md.blocks)")
+        }
+        XCTAssertEqual(table.rows, [["ok", "fine"], ["fail", "broken"]])
+    }
+
+    func testTableFollowedByMoreBlocksKeepsOffsetsCorrect() {
+        var md = IncrementalMarkdown()
+        md.append("| a | b |\n| --- | --- |\n| 1 | 2 |\n\nAfter the table.")
+        XCTAssertEqual(md.blocks.count, 2)
+        md.append(" grows")
+        XCTAssertEqual(md.blocks.last, .paragraph("After the table. grows"))
+        XCTAssertEqual(md.blocks, IncrementalMarkdown.parse(md.source))
+    }
+
     func testChunkedAppendsMatchAFullParseForArbitrarySplits() {
         let document = """
         # Deploy notes
@@ -119,6 +208,12 @@ final class IncrementalMarkdownTests: XCTestCase {
         ```
 
         > quoted line
+
+        | Step | State |
+        | --- | --- |
+        | build | green |
+        | test | red |
+
         ---
         trailing paragraph
         """
@@ -138,6 +233,6 @@ final class IncrementalMarkdownTests: XCTestCase {
             XCTAssertEqual(md.blocks, IncrementalMarkdown.parse(md.source), "split at \(document.distance(from: document.startIndex, to: end))")
             index = end
         }
-        XCTAssertEqual(md.blocks.count, 10)
+        XCTAssertEqual(md.blocks.count, 11)
     }
 }

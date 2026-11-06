@@ -43,6 +43,21 @@ public enum BlockText {
             code.setAll(CodeBlockAttribute.self, to: language ?? "")
             return code
 
+        case .table(let table):
+            // The apps draw a real grid; this is the flat fallback used for
+            // accessibility, copying and any caller that only wants text.
+            var result = AttributedString()
+            for (rowIndex, cells) in ([table.header] + table.rows).enumerated() {
+                if rowIndex > 0 { result.append(AttributedString("\n")) }
+                for (column, cell) in cells.enumerated() {
+                    if column > 0 { result.append(AttributedString("   ")) }
+                    var piece = InlineMarkdown.attributedString(cell)
+                    if rowIndex == 0 { piece.setAll(BoldAttribute.self, to: true) }
+                    result.append(piece)
+                }
+            }
+            return result
+
         case .rule:
             return AttributedString()
         }
@@ -64,6 +79,8 @@ public enum BlockText {
             return InlineMarkdown.plainText(text)
         case .code(_, let body, _):
             return body
+        case .table(let table):
+            return table.plainText
         case .rule:
             return ""
         }
