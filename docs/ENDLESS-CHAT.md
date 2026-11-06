@@ -11,15 +11,32 @@ Tapping a bot opens that bot's conversation. Leaving the conversation returns to
 
 ## 2. One endless conversation per bot
 
-There is **no session list** in the UI. Per bot the app persists exactly one session id:
+There is **no session list** in the UI. Per bot there is exactly one session id, and it is
+**shared by every paired device** — the phone and the Mac open the same stored id instead of each
+minting its own.
 
-- On open: if `endlessSession[botID]` is stored and still resumable → resume it.
-- If missing, deleted or unresumable (`4001`/`4007`) → `session.create`, store the **stored** id
-  (`stored_session_id`), then resume.
-- "Reset conversation" lives in the conversation's overflow menu, behind a confirmation, and
-  clears only that bot's stored id (the old session is left on the host).
+The authority is the bridge (`GET`/`PUT /v1/bots/{profile}/session`, device-authenticated with a
+freshly minted single-use ticket, body `{"stored_session_id": …}`). On open:
 
-Persistence: `UserDefaults`, key `hermes.endlessSession.<botID>`, value = stored session id.
+- ask the bridge for `stored_session_id`; if present → resume **that** id (always with `profile`;
+  a multiplexed gateway cannot resolve a stored id without it);
+- if the bridge has none → resume the locally cached id and **publish** it;
+- if neither → `session.create` (deterministic key `bot-chat:<profile>`), store the **stored** id
+  (`stored_session_id`), then publish it so the other device adopts it.
+
+Local cache: `UserDefaults`, key `hermes.endlessSession.<botID>`, value = stored session id. It is
+only a cache/fallback — a device that boots offline still opens its last conversation, and an older
+bridge (no such route) behaves exactly as before. Every pointer call fails open: a read that cannot
+be made falls back to the cache without publishing (a value we could not see must not be
+clobbered), and a failed publish is logged, never shown as a conversation error.
+
+A stored id that answers `4001`/`4007` is forgotten and replaced by a create, and the replacement is
+published. "Reset conversation" (overflow menu, behind a confirmation) clears the local key **and**
+publishes an empty pointer; the old session is left on the host — reset means "stop reopening this",
+not "delete history". Because the deployed `PUT` refuses a null (`422`, "never a delete"), the reset
+device also keeps a local tombstone (`hermes.endlessSessionReset.<botID>`) so the bridge's row cannot
+pull the forgotten conversation straight back; the tombstone is retired as soon as a replacement is
+published.
 
 ## 3. Auto-compaction
 

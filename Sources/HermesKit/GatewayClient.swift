@@ -60,7 +60,32 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
     /// _create_session`). Without the argument a new session always lands in whichever profile the
     /// gateway defaults to, which is how a user ends up typing into the wrong bot.
     func createSession(model: String?, provider: String?, profile: String?) async throws -> SessionID
+
+    /// Create a session **inside one bot**, with a deterministic idempotency key.
+    ///
+    /// Two devices opening the same bot at the same moment both see "no shared pointer" and both
+    /// call `session.create`; the gateway dedupes retries that carry the same key while the session
+    /// is live in its process (`_IDEMPOTENCY_KEY_TTL`, 300 s), so a key like `bot-chat:<profile>`
+    /// makes them converge on ONE session instead of forking the conversation. Clients with no such
+    /// notion drop the key and forward the plain call.
+    func createSession(model: String?, provider: String?, profile: String?,
+                       idempotencyKey: String?) async throws -> SessionID
     func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry]
+
+    // Shared conversation pointer
+    /// Which stored session is **this bot's** conversation, as the bridge holds it.
+    ///
+    /// The pointer is shared by every paired device, which is the whole point: the phone and the
+    /// Mac resume the same stored id instead of each minting its own. It is HTTP on the bridge
+    /// (`GET /v1/bots/{profile}/session`), not a gateway RPC, so implementations that have no
+    /// bridge credentials — previews, the unpaired client, an older host — answer `nil` and the
+    /// caller falls back to its local cache.
+    func sharedSessionID(forBot profile: String) async throws -> SessionID?
+
+    /// Publish `id` as this bot's conversation so the other device adopts it; `nil` clears it.
+    ///
+    /// Best-effort by contract: a failure here must never block opening a conversation.
+    func publishSharedSessionID(_ id: SessionID?, forBot profile: String) async throws
 
     // Turns
     func submit(session: SessionID, text: String) async throws
@@ -215,6 +240,28 @@ public extension GatewayClientProtocol {
     /// Conformers with no notion of a bot (previews, the unpaired stub, tests) keep the plain call.
     func resumeSession(_ id: SessionID, profile: String?) async throws -> SessionResume {
         try await resumeSession(id)
+    }
+
+    /// A client that cannot carry an idempotency key still creates the session; it just cannot
+    /// coalesce two devices opening the same bot at the same instant.
+    func createSession(model: String?, provider: String?, profile: String?,
+                       idempotencyKey: String?) async throws -> SessionID {
+        _ = idempotencyKey
+        return try await createSession(model: model, provider: provider, profile: profile)
+    }
+
+    /// Without bridge credentials there is no shared pointer to read: say "nothing known" so the
+    /// caller uses its local cache, rather than inventing an id or failing the open.
+    func sharedSessionID(forBot profile: String) async throws -> SessionID? {
+        _ = profile
+        return nil
+    }
+
+    /// A client that cannot write the pointer accepts the publish as a no-op. Reporting success is
+    /// honest here — the id it was handed is what this client will keep using locally, and no
+    /// caller acts on this beyond logging a failure.
+    func publishSharedSessionID(_ id: SessionID?, forBot profile: String) async throws {
+        _ = (id, profile)
     }
 }
 

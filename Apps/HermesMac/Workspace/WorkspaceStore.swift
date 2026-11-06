@@ -15,9 +15,10 @@ import SwiftUI
 ///
 /// **One panel, one conversation.** The Mac matches the phone: the left panel lists bots and
 /// nothing else, and picking a bot opens *that bot's single conversation* through
-/// `AppModel.endlessSession(for:)` — the stored id under `hermes.endlessSession.<botID>`, resumed
-/// on every switch. There is no session list, no session search and no session selection here;
-/// the shell never asks the host for a conversation the model did not already remember.
+/// `AppModel.endlessSession(for:)` — the bot's shared stored id from the bridge (cached per device
+/// under `hermes.endlessSession.<botID>`), resumed on every switch. There is no session list, no
+/// session search and no session selection here; the shell never asks the host for a conversation
+/// the model did not already remember.
 @MainActor
 final class WorkspaceStore: ObservableObject {
 
@@ -518,11 +519,20 @@ final class WorkspaceStore: ObservableObject {
     /// what the ticket flow needs: **each** attempt mints a fresh single-use ticket, so a
     /// reconnect after a drop does not replay a burned one.
     private static func makeModel(for address: PairingAddress) -> AppModel {
-        let client = GatewayClient(makeTransport: {
-            let socketURL = try await address.socketURL()
-            let transport = GatewayTransport(urlProvider: { socketURL })
-            return transport.bridge()
-        })
+        let client = GatewayClient(
+            makeTransport: {
+                let socketURL = try await address.socketURL()
+                let transport = GatewayTransport(urlProvider: { socketURL })
+                return transport.bridge()
+            },
+            // The bot's conversation pointer lives on the bridge, so this Mac and the phone open
+            // the same stored session. Resolved per request: every bridge call needs its own
+            // single-use ticket, and a ticket-only pairing has no refresh token to mint one from.
+            sessionPointer: BridgeBotSessionPointer(endpoint: {
+                guard !address.isTicketOnly else { throw MacDeviceService.Failure.devicePairingRequired }
+                let ticket = try await address.mintedTicket()
+                return (try address.apiOrigin(), ticket)
+            }))
         return AppModel(client: client, hostName: address.displayHost)
     }
 }

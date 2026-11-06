@@ -61,14 +61,26 @@ final class AppEnvironment: ObservableObject {
         if let client {
             resolvedClient = client
         } else {
-            resolvedClient = GatewayClient(makeTransport: { [box, bridge] in
-                guard let credentials = await box.credentials() else {
-                    throw BridgeError.noHost
-                }
-                let url = try await bridge.websocketURL(for: credentials.host,
-                                                        refreshToken: credentials.token)
-                return GatewayTransport(urlProvider: { url }).bridge()
-            })
+            resolvedClient = GatewayClient(
+                makeTransport: { [box, bridge] in
+                    guard let credentials = await box.credentials() else {
+                        throw BridgeError.noHost
+                    }
+                    let url = try await bridge.websocketURL(for: credentials.host,
+                                                            refreshToken: credentials.token)
+                    return GatewayTransport(urlProvider: { url }).bridge()
+                },
+                // The one pointer both devices share, read/written over the bridge's HTTP surface
+                // with a freshly minted single-use ticket (same shape as `BotIconService`). It is
+                // resolved per request because the ticket is spent by exactly one call and the
+                // paired host can change; a failure just means this phone uses its local cache.
+                sessionPointer: BridgeBotSessionPointer(endpoint: {
+                    guard let credentials = await box.credentials() else { throw BridgeError.noHost }
+                    let ticket = try await BotIconService.mintTicket(baseURL: credentials.host.baseURL,
+                                                                     deviceID: credentials.host.deviceID,
+                                                                     refreshToken: credentials.token)
+                    return (credentials.host.baseURL, ticket)
+                }))
         }
         self.box = box
         self.model = AppModel(client: resolvedClient, hostName: store.host?.host ?? "hermes")

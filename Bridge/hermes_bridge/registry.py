@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS devices (
     revoked_at          REAL
 );
 CREATE INDEX IF NOT EXISTS devices_revoked_idx ON devices (revoked);
+-- The one conversation both apps mean by "this bot". A row is only rewritten,
+-- never deleted: a device that knows no session yet reads NULL.
+CREATE TABLE IF NOT EXISTS bot_sessions (
+    profile            TEXT PRIMARY KEY,
+    stored_session_id  TEXT NOT NULL,
+    updated_at         REAL NOT NULL
+);
 """
 
 
@@ -244,3 +251,35 @@ class DeviceRegistry:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    # -- shared per-bot session pointer ------------------------------------
+
+    def get_bot_session(self, profile: str) -> Optional[str]:
+        """The stored session id for ``profile``, or ``None`` when unset."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT stored_session_id FROM bot_sessions WHERE profile = ?",
+                (profile,),
+            ).fetchone()
+        return row["stored_session_id"] if row else None
+
+    def set_bot_session(
+        self,
+        *,
+        profile: str,
+        stored_session_id: str,
+        now: Optional[float] = None,
+    ) -> float:
+        """Upsert the pointer; last write wins. Returns ``updated_at``."""
+        timestamp = time.time() if now is None else now
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO bot_sessions (profile, stored_session_id, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(profile) DO UPDATE SET "
+                "stored_session_id = excluded.stored_session_id, "
+                "updated_at = excluded.updated_at",
+                (profile, stored_session_id, timestamp),
+            )
+            conn.commit()
+        return timestamp

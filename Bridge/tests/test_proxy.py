@@ -28,6 +28,7 @@ ALLOWED_AUDIT_KEYS = {
     "outcome",
     "reason",
     "close_code",
+    "profile",
 }
 
 

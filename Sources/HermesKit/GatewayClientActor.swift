@@ -138,6 +138,10 @@ public actor GatewayClient: GatewayClientProtocol {
     }
 
     private let makeTransport: TransportFactory
+    /// The bridge-owned answer to "which stored session is this bot's conversation". `nil` for a
+    /// client with no bridge credentials; every read then answers `nil` and every publish is a
+    /// no-op, which is exactly the pre-sync behaviour.
+    private let sessionPointer: BotSessionPointerStore?
     private let timeouts: Timeouts
     private let policy: ReconnectPolicy
     private let stateBox = TransportStateBox()
@@ -178,9 +182,11 @@ public actor GatewayClient: GatewayClientProtocol {
     private var rewindSurvivors: [SessionID: [Int64?]] = [:]
 
     public init(makeTransport: @escaping TransportFactory,
+                sessionPointer: BotSessionPointerStore? = nil,
                 timeouts: Timeouts = Timeouts(),
                 reconnect: ReconnectPolicy = ReconnectPolicy()) {
         self.makeTransport = makeTransport
+        self.sessionPointer = sessionPointer
         self.timeouts = timeouts
         self.policy = reconnect
     }
@@ -279,12 +285,21 @@ public actor GatewayClient: GatewayClientProtocol {
     }
 
     public func createSession(model: String?, provider: String?, profile: String?) async throws -> SessionID {
+        try await createSession(model: model, provider: provider, profile: profile, idempotencyKey: nil)
+    }
+
+    public func createSession(model: String?, provider: String?, profile: String?,
+                              idempotencyKey: String?) async throws -> SessionID {
         var params: [String: JSONValue] = [:]
         if let model { params["model"] = .string(model) }
         if let provider { params["provider"] = .string(provider) }
         // `profile` binds the new session to that bot for its whole life: the gateway stores the
         // resulting profile_home and re-binds HERMES_HOME on every turn.
         if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
+        // A deterministic key lets a second device that opened the same bot at the same moment land
+        // on this session instead of minting a twin (`methods_session.py` dedupes within 300 s while
+        // the session is live).
+        if let idempotencyKey, !idempotencyKey.isEmpty { params["idempotency_key"] = .string(idempotencyKey) }
         let result = try await perform("session.create", params: .object(params), timeout: timeouts.sessionResume)
         guard let runtimeID = result?["session_id"]?.stringValue else {
             throw GatewayError.malformedResponse(method: "session.create")
@@ -304,6 +319,25 @@ public actor GatewayClient: GatewayClientProtocol {
                                        params: .object(["session_id": .string(id)]),
                                        timeout: timeouts.call)
         return try GatewayPayloadDecoder.history(result, limit: limit)
+    }
+
+    // MARK: Shared conversation pointer
+
+    /// The bridge's answer, not the gateway's: the pointer is HTTP on the bridge surface, so it
+    /// travels through a `BotSessionPointerStore` rather than a JSON-RPC method. No store (tests,
+    /// previews, a client built without bridge credentials) means "nothing known", which sends the
+    /// caller to its local cache.
+    public func sharedSessionID(forBot profile: String) async throws -> SessionID? {
+        guard let sessionPointer else { return nil }
+        return try await sessionPointer.storedSessionID(for: profile)
+    }
+
+    /// Fire-and-forget by nature, but `throws` so the caller can log that the other device will
+    /// keep its own pointer. Never retried here: an unreachable bridge is the caller's problem to
+    /// ignore, not something to queue behind a conversation that already opened.
+    public func publishSharedSessionID(_ id: SessionID?, forBot profile: String) async throws {
+        guard let sessionPointer else { return }
+        try await sessionPointer.publish(storedSessionID: id, for: profile)
     }
 
     // MARK: Turns
@@ -1073,11 +1107,12 @@ extension GatewayClient {
     /// to typecheck the protocol core against a fake transport.
     public static func webSocket(urlProvider: @escaping GatewayTransport.URLProvider,
                                  session: URLSession = .shared,
+                                 sessionPointer: BotSessionPointerStore? = nil,
                                  timeouts: Timeouts = Timeouts(),
                                  reconnect: ReconnectPolicy = ReconnectPolicy()) -> GatewayClient {
         GatewayClient(makeTransport: {
             GatewayTransport(urlProvider: urlProvider, session: session).bridge()
-        }, timeouts: timeouts, reconnect: reconnect)
+        }, sessionPointer: sessionPointer, timeouts: timeouts, reconnect: reconnect)
     }
 }
 #endif

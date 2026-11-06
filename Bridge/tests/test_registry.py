@@ -125,6 +125,22 @@ def test_public_key_is_kept_for_future_signature_checks(tmp_path):
         reg.close()
 
 
+def test_bot_session_pointer_upserts_and_survives_restart(tmp_path):
+    reg = make_registry(tmp_path)
+    assert reg.get_bot_session("research") is None
+    assert reg.set_bot_session(profile="research", stored_session_id="a", now=1.0) == 1.0
+    assert reg.set_bot_session(profile="research", stored_session_id="b", now=2.0) == 2.0
+    assert reg.get_bot_session("research") == "b"
+    reg.close()
+
+    reopened = make_registry(tmp_path)
+    try:
+        assert reopened.get_bot_session("research") == "b"
+        assert reopened.get_bot_session("other") is None
+    finally:
+        reopened.close()
+
+
 def test_cleanup_waits_for_concurrent_state_change_and_never_deletes_active(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     import threading

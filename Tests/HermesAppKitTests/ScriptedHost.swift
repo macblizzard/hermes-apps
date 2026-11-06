@@ -63,8 +63,17 @@ final class ScriptedHost: GatewayClientProtocol, @unchecked Sendable {
         SessionSummary(id: session, title: "test thread")
     }
 
-    func resumeSession(_ id: SessionID) async throws -> SessionResume { resume() }
-    func resumeSession(_ id: SessionID, profile: String?) async throws -> SessionResume { resume() }
+    func resumeSession(_ id: SessionID) async throws -> SessionResume {
+        resumed.append(id)
+        if let resumeError { throw resumeError }
+        return resume()
+    }
+
+    func resumeSession(_ id: SessionID, profile: String?) async throws -> SessionResume {
+        resumed.append(id)
+        if let resumeError { throw resumeError }
+        return resume()
+    }
 
     private func resume() -> SessionResume {
         SessionResume(id: session, entries: entries, inflight: nil, openRequests: [])
@@ -72,7 +81,39 @@ final class ScriptedHost: GatewayClientProtocol, @unchecked Sendable {
 
     func createSession(model: String?, provider: String?) async throws -> SessionID { session }
     func createSession(model: String?, provider: String?, profile: String?) async throws -> SessionID { session }
+
+    func createSession(model: String?, provider: String?, profile: String?,
+                       idempotencyKey: String?) async throws -> SessionID {
+        createKeys.append(idempotencyKey)
+        return session
+    }
     func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry] { entries }
+
+    // MARK: Shared conversation pointer
+
+    /// What the bridge answers for `sharedSessionID(forBot:)`. `nil` is "the bridge has no pointer
+    /// for this bot"; `hostPointerError` models a bridge that cannot be asked at all.
+    var hostPointer: String?
+    var hostPointerError: Error?
+    var publishError: Error?
+    /// Thrown by every resume, to model a host that forgot the session (4001/4007).
+    var resumeError: Error?
+    /// Every publish that crossed the client boundary, in order — `nil` id means "clear it".
+    private(set) var published: [(id: SessionID?, profile: String)] = []
+    /// Every id this host was asked to resume, so a test can prove *which* stored id opened.
+    private(set) var resumed: [SessionID] = []
+    /// Every idempotency key a create carried, in order.
+    private(set) var createKeys: [String?] = []
+
+    func sharedSessionID(forBot profile: String) async throws -> SessionID? {
+        if let hostPointerError { throw hostPointerError }
+        return hostPointer
+    }
+
+    func publishSharedSessionID(_ id: SessionID?, forBot profile: String) async throws {
+        if let publishError { throw publishError }
+        published.append((id, profile))
+    }
 
     // MARK: Turns
 

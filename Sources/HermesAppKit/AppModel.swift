@@ -2,6 +2,9 @@
 import Foundation
 import Combine
 import HermesKit
+#if canImport(os)
+import os
+#endif
 
 /// Shared application state for both apps.
 ///
@@ -158,6 +161,10 @@ public final class AppModel: ObservableObject {
         static let autoCompactTokens = "hermes.autoCompactTokens"
         /// One stored session id per bot — the endless-chat contract (`docs/ENDLESS-CHAT.md` §2).
         static let endlessSessionPrefix = "hermes.endlessSession."
+        /// The id this device reset, until something newer is published. The bridge's PUT has no
+        /// "clear" (`bot_sessions.py`: a null is a 422, "never a delete"), so without this a reset
+        /// device would adopt the very conversation it just forgot on its next open.
+        static let endlessResetPrefix = "hermes.endlessSessionReset."
     }
 
     static let defaults = UserDefaults.standard
@@ -586,12 +593,26 @@ public final class AppModel: ObservableObject {
 
     /// The one conversation this bot has: resume it, or start and remember one.
     ///
-    /// The product has no session list, so each bot owns exactly one stored id
-    /// (`hermes.endlessSession.<botID>`). A stored id stays resumable until the host forgets the
-    /// session: `4001` is "session not found" and `4007` is the same for an id from another profile,
-    /// and only those two justify opening a new conversation. Any other failure (a timeout, a dead
-    /// socket) is reported instead — starting a blank conversation over a transient error would
-    /// hide the user's history behind a new empty one.
+    /// The pointer is **shared**, not per device. `hermes.endlessSession.<botID>` is only this
+    /// device's cache now; the authority is the bridge's per-bot pointer
+    /// (`GET`/`PUT /v1/bots/{profile}/session`), so the phone and the Mac open the same stored
+    /// session instead of each minting its own. The order is:
+    ///
+    /// 1. ask the bridge for this bot's stored id — it is the shared answer and beats a stale
+    ///    local key;
+    /// 2. no host value: resume the locally known id and publish it, so the other device adopts it;
+    /// 3. neither: create, then publish the new stored id.
+    ///
+    /// Every bridge call fails open. An unreachable or older bridge leaves this device on its own
+    /// cache: opening a conversation is never blocked on the pointer, nothing about the sync leg
+    /// lands in `lastSendError`, and a failed publish is logged only (the other device keeps its
+    /// id until the next successful write).
+    ///
+    /// A stored id stays resumable until the host forgets the session: `4001` is "session not
+    /// found" and `4007` is the same for an id from another profile, and only those two justify
+    /// opening a new conversation. Any other failure (a timeout, a dead socket) is reported
+    /// instead — starting a blank conversation over a transient error would hide the user's
+    /// history behind a new empty one.
     public func endlessSession(for botID: String) async -> SessionID? {
         if botID != selectedBotID {
             // The transcript, tools and streaming state on screen belong to the bot being left.
@@ -600,13 +621,21 @@ public final class AppModel: ObservableObject {
         }
         await loadModelLabel()
         let key = Self.endlessKey(botID)
-        if let stored = Self.defaults.string(forKey: key), !stored.isEmpty {
+        let plan = EndlessSessionPolicy.plan(host: await sharedSessionPointer(for: botID),
+                                             local: Self.defaults.string(forKey: key))
+        if let stored = plan.resumedID {
             do {
                 let resumed = try await client.resumeSession(stored, profile: botID)
                 selectedSessionID = stored
                 transcript = resumed.entries
                 pendingRequests = resumed.openRequests
                 adopt(resumed, session: stored)
+                // Whatever actually opened is the best cache this device can keep — including a
+                // host id that replaced a different local one.
+                Self.defaults.set(stored, forKey: key)
+                if plan.publish {
+                    await publishSharedSession(stored, for: botID)
+                }
                 return stored
             } catch is CancellationError {
                 // Leaving the screen cancels the open-in-flight; the next visit resumes normally.
@@ -618,16 +647,25 @@ public final class AppModel: ObservableObject {
                     lastSendError = "could not open the conversation: \(error.localizedDescription)"
                     return nil
                 }
+                // Forget it locally too, so an offline open does not retry a dead id.
+                Self.defaults.removeObject(forKey: key)
             }
         }
         do {
             // `createSession` answers with the **stored** id, which is what a later resume needs.
-            let created = try await client.createSession(model: nil, provider: nil, profile: botID)
+            // The idempotency key is per bot, so two devices opening it at the same moment converge
+            // on one session instead of forking before either has published anything.
+            let created = try await client.createSession(model: nil, provider: nil, profile: botID,
+                                                         idempotencyKey: "bot-chat:\(botID)")
             Self.defaults.set(created, forKey: key)
             // The row does not exist until the first prompt, so this is a draft: mark it before
             // `select`, whose resume would otherwise answer 4007 and report an unreachable host.
             draftSessionIDs.insert(created)
             await select(created)
+            // Always published: a conversation this device just minted cannot already be the
+            // bridge's answer (anything it held was absent or proven dead), and the other device
+            // needs it to converge.
+            await publishSharedSession(created, for: botID)
             return created
         } catch {
             lastSendError = "could not start a conversation: \(error.localizedDescription)"
@@ -639,11 +677,21 @@ public final class AppModel: ObservableObject {
     ///
     /// Only the stored id is cleared: the session itself stays on the host, because deleting
     /// history is not what "reset" on this screen means (and the host refuses to delete a session
-    /// it still holds live).
+    /// it still holds live). The clear is published to the bridge as well — otherwise the other
+    /// device would keep reopening the conversation, and the next open here would adopt it back
+    /// from the host.
     public func resetEndlessSession(for botID: String) {
         let key = Self.endlessKey(botID)
         let stored = Self.defaults.string(forKey: key)
         Self.defaults.removeObject(forKey: key)
+        // Remember what was forgotten: the bridge route cannot clear its row, so without this the
+        // next open would read the same id back and reopen the conversation the user just dropped.
+        if let stored, !stored.isEmpty {
+            Self.defaults.set(stored, forKey: Self.resetKey(botID))
+        }
+        // Fire-and-forget, after the local state is settled: this device is reset even if the
+        // bridge never hears about it (a failure only means the other device has to reset too).
+        Task { await publishSharedSession(nil, for: botID) }
         guard let stored, selectedSessionID == stored else { return }
         // The conversation on screen is the one just forgotten: leaving its bubbles up would let
         // the user keep typing into a session nothing will reopen.
@@ -659,6 +707,62 @@ public final class AppModel: ObservableObject {
         compactionNotice = nil
         runningSessions.remove(stored)
     }
+
+    /// What the bridge says this bot's conversation is, normalised for `EndlessSessionPolicy`.
+    ///
+    /// Never throws: a read the client cannot make is `.unavailable`, which sends the open down the
+    /// local-cache path. An unusable value (empty, whitespace, a path separator) is treated as
+    /// `.absent` so it is repaired by a publish rather than passed to `session.resume`.
+    private func sharedSessionPointer(for botID: String) async -> EndlessSessionPointerState {
+        do {
+            guard let raw = try await client.sharedSessionID(forBot: botID) else { return .absent }
+            guard let stored = EndlessSessionPolicy.storedID(raw) else {
+                Self.noteSessionSync("bridge returned an unusable stored session id for “\(botID)”; using the local cache")
+                return .absent
+            }
+            // A conversation this device reset must not come straight back from the bridge. The id
+            // is only ignored while it is exactly the one forgotten: a newer session created on the
+            // other device is adopted normally.
+            if Self.defaults.string(forKey: Self.resetKey(botID)) == stored {
+                Self.noteSessionSync("ignoring the bridge's conversation for “\(botID)”: this device reset it")
+                return .absent
+            }
+            return .value(stored)
+        } catch {
+            Self.noteSessionSync("could not read the shared conversation for “\(botID)”: \(error.localizedDescription); using the local cache")
+            return .unavailable
+        }
+    }
+
+    /// Best-effort write of the shared pointer. Failures are logged and swallowed: the local key is
+    /// already correct, so this device stays consistent, and blocking here would trade a working
+    /// conversation for a sync error.
+    private func publishSharedSession(_ id: SessionID?, for botID: String) async {
+        do {
+            try await client.publishSharedSessionID(id, forBot: botID)
+            // A published id is the new shared answer, so the reset tombstone has done its job.
+            if let id, !id.isEmpty {
+                Self.defaults.removeObject(forKey: Self.resetKey(botID))
+            }
+        } catch {
+            Self.noteSessionSync("could not publish the shared conversation for “\(botID)”: \(error.localizedDescription)")
+        }
+    }
+
+    /// Diagnostics for the shared-pointer leg only — deliberately not `lastSendError`, because a
+    /// bridge that cannot be reached must not put an error in front of a conversation that opened
+    /// fine.
+    private static func noteSessionSync(_ message: String) {
+        #if canImport(os)
+        sessionSyncLog.notice("\(message, privacy: .public)")
+        #else
+        print("endless-session: \(message)")
+        #endif
+    }
+
+    #if canImport(os)
+    private static let sessionSyncLog = Logger(subsystem: "hermes.apps", category: "endless-session")
+    #endif
 
     // MARK: Compaction
 
@@ -698,6 +802,10 @@ public final class AppModel: ObservableObject {
 
     private static func endlessKey(_ botID: String) -> String {
         Keys.endlessSessionPrefix + botID
+    }
+
+    private static func resetKey(_ botID: String) -> String {
+        Keys.endlessResetPrefix + botID
     }
 
     private static func isForgottenSession(_ error: GatewayError) -> Bool {

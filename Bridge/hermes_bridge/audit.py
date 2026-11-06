@@ -39,6 +39,7 @@ EVENTS = frozenset(
         "protocol_error",
         "upstream_error",
         "request_abandoned",
+        "session_pointer",
         "http",
     }
 )
@@ -90,6 +91,7 @@ class AuditLog:
         outcome: Optional[str] = None,
         reason: Optional[str] = None,
         close_code: Optional[int] = None,
+        profile: Optional[str] = None,
     ) -> dict[str, Any]:
         if event not in EVENTS:
             raise ValueError(f"unknown audit event: {event!r}")
@@ -117,6 +119,10 @@ class AuditLog:
                 record["close_code"] = int(close_code)
             except (TypeError, ValueError):
                 pass
+        if profile is not None:
+            # A profile name is not a secret, but it is still caller-supplied:
+            # it goes through the same closed character set as a token.
+            record["profile"] = profile if _SAFE_TOKEN.match(profile) else "invalid"
 
         line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
         self._logger.info(line)
