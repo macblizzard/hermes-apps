@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Original geometric robot portraits. These are not representations of existing characters.
 public enum BotIcon: String, CaseIterable, Identifiable, Codable {
-    case ember, nova, cobalt, orbit, moss, dusk
+    case ember, nova, cobalt, orbit, moss, dusk, beacon, pixel, rover, prism
     public var id: String { rawValue }
     public var title: String { rawValue.capitalized }
     fileprivate var tint: Color {
@@ -13,6 +13,10 @@ public enum BotIcon: String, CaseIterable, Identifiable, Codable {
         case .orbit: return .purple
         case .moss: return .green
         case .dusk: return .indigo
+        case .beacon: return .yellow
+        case .pixel: return .mint
+        case .rover: return .blue
+        case .prism: return .red
         }
     }
     fileprivate var variant: Int { Self.allCases.firstIndex(of: self) ?? 0 }
@@ -32,6 +36,7 @@ public struct BotIconPortrait: View {
         ZStack {
             Circle().fill(icon.tint.opacity(0.18))
             Circle().strokeBorder(icon.tint.opacity(0.6), lineWidth: 1)
+            if icon.variant < 6 {
             VStack(spacing: size * 0.035) {
                 if icon.variant % 2 == 0 {
                     Capsule().fill(icon.tint).frame(width: size * 0.09, height: size * 0.12)
@@ -51,10 +56,86 @@ public struct BotIconPortrait: View {
                     }
                 }.frame(width: size * 0.54, height: size * 0.43)
             }
+            } else {
+                newPortrait
+            }
             BotWorkingSparks(size: size, color: icon.tint, isWorking: isWorking)
         }
         .frame(width: size, height: size)
         .accessibilityLabel("\(icon.title) robot icon")
+    }
+
+
+    // Each new silhouette is drawn in normalized coordinates so it scales with
+    // the same portrait sizes as the original six, without bundled artwork.
+    @ViewBuilder private var newPortrait: some View {
+        switch icon {
+        case .beacon:
+            VStack(spacing: size * 0.02) {
+                Circle().fill(icon.tint).frame(width: size * 0.12, height: size * 0.12)
+                Capsule().fill(icon.tint.opacity(0.85))
+                    .frame(width: size * 0.48, height: size * 0.48)
+                    .overlay(Circle().fill(.black.opacity(0.8))
+                        .frame(width: size * 0.19, height: size * 0.19)
+                        .overlay(Circle().fill(.white.opacity(0.8))
+                            .frame(width: size * 0.05, height: size * 0.05)))
+            }
+        case .pixel:
+            VStack(spacing: size * 0.03) {
+                HStack(spacing: size * 0.22) {
+                    Rectangle().frame(width: size * 0.06, height: size * 0.1)
+                    Rectangle().frame(width: size * 0.06, height: size * 0.1)
+                }.foregroundStyle(icon.tint)
+                Rectangle().fill(icon.tint.opacity(0.85))
+                    .frame(width: size * 0.56, height: size * 0.39)
+                    .overlay(VStack(spacing: size * 0.07) {
+                        HStack(spacing: size * 0.12) {
+                            Rectangle().frame(width: size * 0.08, height: size * 0.08)
+                            Rectangle().frame(width: size * 0.08, height: size * 0.08)
+                        }
+                        Rectangle().frame(width: size * 0.22, height: size * 0.035)
+                    }.foregroundStyle(.black.opacity(0.8)))
+            }
+        case .rover:
+            VStack(spacing: size * 0.025) {
+                Capsule().fill(icon.tint).frame(width: size * 0.25, height: size * 0.06)
+                HStack(spacing: 0) {
+                    Circle().fill(icon.tint).frame(width: size * 0.12, height: size * 0.12)
+                    RoundedRectangle(cornerRadius: size * 0.11)
+                        .fill(icon.tint.opacity(0.85))
+                        .frame(width: size * 0.46, height: size * 0.38)
+                        .overlay(Capsule().fill(.black.opacity(0.8))
+                            .frame(width: size * 0.34, height: size * 0.13)
+                            .overlay(HStack(spacing: size * 0.10) {
+                                Circle().fill(.white.opacity(0.8))
+                                Circle().fill(.white.opacity(0.8))
+                            }.frame(width: size * 0.19, height: size * 0.045)))
+                    Circle().fill(icon.tint).frame(width: size * 0.12, height: size * 0.12)
+                }
+            }
+        case .prism:
+            VStack(spacing: size * 0.03) {
+                Capsule().fill(icon.tint).frame(width: size * 0.06, height: size * 0.10)
+                Path { path in
+                    path.move(to: CGPoint(x: size * 0.28, y: 0))
+                    path.addLine(to: CGPoint(x: size * 0.56, y: size * 0.13))
+                    path.addLine(to: CGPoint(x: size * 0.48, y: size * 0.39))
+                    path.addLine(to: CGPoint(x: size * 0.08, y: size * 0.39))
+                    path.addLine(to: CGPoint(x: 0, y: size * 0.13))
+                    path.closeSubpath()
+                }.fill(icon.tint.opacity(0.85))
+                    .frame(width: size * 0.56, height: size * 0.39)
+                    .overlay(VStack(spacing: size * 0.07) {
+                        HStack(spacing: size * 0.12) {
+                            Capsule().frame(width: size * 0.09, height: size * 0.045)
+                            Capsule().frame(width: size * 0.09, height: size * 0.045)
+                        }
+                        Circle().frame(width: size * 0.06, height: size * 0.06)
+                    }.foregroundStyle(.black.opacity(0.8)))
+            }
+        default:
+            EmptyView()
+        }
     }
 
 }

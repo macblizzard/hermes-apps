@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from .device_auth import require_device
 
-Icon = Literal['ember', 'nova', 'cobalt', 'orbit', 'moss', 'dusk']
+Icon = Literal['ember', 'nova', 'cobalt', 'orbit', 'moss', 'dusk', 'beacon', 'pixel', 'rover', 'prism']
 
 
 class IconChange(BaseModel):

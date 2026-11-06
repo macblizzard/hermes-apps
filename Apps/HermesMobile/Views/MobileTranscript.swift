@@ -15,6 +15,7 @@ struct MobileTranscriptRow: View {
     let entry: TranscriptEntry
     @EnvironmentObject private var app: AppEnvironment
     @State private var showingSelection = false
+    @State private var showingReactionPicker = false
     @AppStorage("mobile.messageReactions.v1") private var storedReactions = "{}"
     private static let speaker = AVSpeechSynthesizer()
     private static let emojis = ["👍", "❤️", "😂", "😮", "😢", "🎉"]
@@ -51,6 +52,10 @@ struct MobileTranscriptRow: View {
                 Button(emoji) { setReaction(emoji) }
                     .accessibilityLabel("Remove reaction \(emoji)")
             }
+        }
+        .popover(isPresented: $showingReactionPicker, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
+            reactionPicker
+                .presentationCompactAdaptation(.popover)
         }
         .sheet(isPresented: $showingSelection) {
             NavigationStack {
@@ -103,11 +108,7 @@ struct MobileTranscriptRow: View {
                 Label("Read Aloud", systemImage: "speaker.wave.2")
             }
             if reactionKey != nil {
-                Menu {
-                    ForEach(Self.emojis, id: \.self) { emoji in
-                        Button(emoji) { setReaction(emoji) }
-                    }
-                } label: {
+                Button { showingReactionPicker = true } label: {
                     Label("Add reaction", systemImage: "face.smiling")
                 }
             }
@@ -127,6 +128,27 @@ struct MobileTranscriptRow: View {
                 Label("Copy code block", systemImage: "chevron.left.forwardslash.chevron.right")
             }
         }
+    }
+
+    private var reactionPicker: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.fixed(44), spacing: 4), count: 3), spacing: 4) {
+            ForEach(Self.emojis, id: \.self) { emoji in
+                Button {
+                    setReaction(emoji)
+                    showingReactionPicker = false
+                } label: {
+                    Text(emoji)
+                        .font(.system(size: 26))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("React with \(emoji)")
+                .accessibilityHint("Select again to remove this reaction")
+            }
+        }
+        .padding(8)
+        .frame(width: 156)
     }
 
     /// The first fenced block, so a long answer with code does not force a whole-message copy.
