@@ -40,8 +40,13 @@ struct ConversationScreen: View {
     @State private var speakReplies = false
     @State private var lastSpokenEntryID: String?
     @State private var showBotSettings = false
+    @State private var isSearching = false
+    @State private var searchText = ""
+    @State private var searchIndex = 0
+    @FocusState private var searchFocused: Bool
 
     private static let bottomID = "conversation-bottom"
+    private static let streamingSearchID = "conversation-streaming-search"
 
     /// The two system pickers that need their own presentation; Files uses `.fileImporter`.
     enum AttachmentSource: String, Identifiable {
@@ -193,6 +198,10 @@ struct ConversationScreen: View {
             .frame(minHeight: 30)
 
             Hairline(color: Tokens.border)
+            if isSearching {
+                searchBar
+                Hairline(color: Tokens.border)
+            }
         }
         .background(Tokens.canvas)
     }
@@ -222,6 +231,70 @@ struct ConversationScreen: View {
     }
 
     // MARK: Transcript
+
+    /// Search visible transcript text, including the summaries of tool and reasoning rows.
+    private var searchMatches: [String] {
+        guard !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        var ids = model.transcript.filter { entry in
+            entry.text.localizedCaseInsensitiveContains(searchText)
+        }.map(\.id)
+        if !model.streamingText.isEmpty,
+           model.streamingText.localizedCaseInsensitiveContains(searchText) {
+            ids.append(Self.streamingSearchID)
+        }
+        return ids
+    }
+
+    private var selectedSearchID: String? {
+        let matches = searchMatches
+        guard isSearching, matches.indices.contains(searchIndex) else { return nil }
+        return matches[searchIndex]
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Tokens.textMuted)
+            TextField("Search messages", text: $searchText)
+                .focused($searchFocused)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+                .accessibilityIdentifier("conversationSearchField")
+            Text(searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                 ? "" : searchMatches.isEmpty ? "No matches" : "\(min(searchIndex + 1, searchMatches.count)) of \(searchMatches.count)")
+                .font(TypeScale.font(TypeScale.sm))
+                .foregroundStyle(Tokens.textSecondary)
+                .fixedSize()
+                .accessibilityIdentifier("conversationSearchCount")
+            Button { moveSearch(-1) } label: { Image(systemName: "chevron.up") }
+                .disabled(searchMatches.isEmpty)
+                .accessibilityLabel("Previous search result")
+            Button { moveSearch(1) } label: { Image(systemName: "chevron.down") }
+                .disabled(searchMatches.isEmpty)
+                .accessibilityLabel("Next search result")
+            Button("Done") {
+                searchFocused = false
+                isSearching = false
+                searchText = ""
+                searchIndex = 0
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .onAppear { searchFocused = true }
+    }
+
+    private func moveSearch(_ direction: Int) {
+        let count = searchMatches.count
+        guard count > 0 else { return }
+        searchIndex = (min(searchIndex, count - 1) + direction + count) % count
+    }
+
+    private func scrollToSearchResult(_ proxy: ScrollViewProxy) {
+        guard let id = selectedSearchID else { return }
+        withAnimation(Motion.messageIn) { proxy.scrollTo(id, anchor: .center) }
+    }
 
     /// Split out of `body` on purpose: a ScrollViewReader + ScrollView + LazyVStack + six
     /// conditionals in one expression exceeded the type-checker's budget
@@ -261,6 +334,18 @@ struct ConversationScreen: View {
             .onChange(of: model.reasoningText) {
                 scroll(proxy, animated: false)
             }
+            .onChange(of: searchText) {
+                searchIndex = 0
+                scrollToSearchResult(proxy)
+            }
+            .onChange(of: searchIndex) {
+                scrollToSearchResult(proxy)
+            }
+            .onChange(of: searchMatches) {
+                guard isSearching else { return }
+                searchIndex = min(searchIndex, max(0, searchMatches.count - 1))
+                scrollToSearchResult(proxy)
+            }
         }
     }
 
@@ -276,6 +361,13 @@ struct ConversationScreen: View {
 
             ForEach(model.transcript) { entry in
                 MobileTranscriptRow(entry: entry)
+                    .overlay {
+                        if selectedSearchID == entry.id {
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(Tokens.accentText, lineWidth: 2)
+                                .allowsHitTesting(false)
+                        }
+                    }
                     .id(entry.id)
             }
 
@@ -302,6 +394,14 @@ struct ConversationScreen: View {
 
             if model.isStreaming || !model.streamingText.isEmpty {
                 MobileStreamingBubble(text: model.streamingText)
+                    .overlay {
+                        if selectedSearchID == Self.streamingSearchID {
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(Tokens.accentText, lineWidth: 2)
+                                .allowsHitTesting(false)
+                        }
+                    }
+                    .id(Self.streamingSearchID)
             }
 
             Color.clear
@@ -378,6 +478,13 @@ struct ConversationScreen: View {
                 }
 
                 Menu {
+                    Button {
+                        isSearching = true
+                        searchFocused = true
+                    } label: {
+                        Label("Search conversation", systemImage: "magnifyingglass")
+                    }
+
                     Button {
                         showBotSettings = true
                     } label: {
@@ -639,7 +746,7 @@ struct ConversationScreen: View {
         keyboardHeight = height
         keyboardScrollTask?.cancel()
         // A shrinking keyboard reveals more history; do not fight interactive dismissal.
-        guard height > 0, !isDraggingTranscript,
+        guard !isSearching, height > 0, !isDraggingTranscript,
               height > previousHeight || sizeChanged else { return }
 
         let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.25
@@ -655,7 +762,7 @@ struct ConversationScreen: View {
     }
 
     private func scroll(_ proxy: ScrollViewProxy, animated: Bool) {
-        guard !model.transcript.isEmpty || model.isStreaming else { return }
+        guard !isSearching, (!model.transcript.isEmpty || model.isStreaming) else { return }
         if animated {
             withAnimation(Motion.messageIn) {
                 proxy.scrollTo(ConversationScreen.bottomID, anchor: .bottom)

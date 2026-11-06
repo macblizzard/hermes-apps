@@ -89,7 +89,7 @@ struct MobileTranscriptRow: View {
         case .tool:
             toolResult
         case .reasoning:
-            MobileReasoningBlock(text: entry.text)
+            MobileReasoningBlock(text: entry.text, standaloneMenu: false)
         case .system:
             systemNote
         }
@@ -112,6 +112,9 @@ struct MobileTranscriptRow: View {
                     Label("Add reaction", systemImage: "face.smiling")
                 }
             }
+        }
+        ShareLink(item: entry.text) {
+            Label("Share", systemImage: "square.and.arrow.up")
         }
         Button {
             UIPasteboard.general.string = entry.text
@@ -216,7 +219,8 @@ struct MobileTranscriptRow: View {
                              summary: summary,
                              output: entry.tool?.detail,
                              isRunning: false,
-                             durationMS: nil)
+                             durationMS: nil,
+                             standaloneMenu: false)
     }
 
     private var systemNote: some View {
@@ -244,6 +248,7 @@ struct MobileToolRow: View {
     var output: String? = nil
     var isRunning: Bool = false
     var durationMS: Int? = nil
+    var standaloneMenu = true
 
     @State private var expanded = false
 
@@ -279,6 +284,8 @@ struct MobileToolRow: View {
         }
         .cardSurface()
         .animation(Motion.toolCard, value: expanded)
+        .modifier(MobileStandaloneShareMenu(enabled: standaloneMenu,
+                                            text: [name, summary, shownOutput].compactMap { $0 }.joined(separator: "\n")))
     }
 
     private var header: some View {
@@ -394,6 +401,7 @@ struct MobileToolRow: View {
 /// `thinking.delta` text *and* the user asked for it in Settings.
 struct MobileReasoningBlock: View {
     let text: String
+    var standaloneMenu = true
 
     @State private var expanded = false
 
@@ -443,6 +451,26 @@ struct MobileReasoningBlock: View {
         )
         .hairlineBorder()
         .animation(Motion.toolCard, value: expanded)
+        .modifier(MobileStandaloneShareMenu(enabled: standaloneMenu, text: text))
+    }
+}
+
+/// Live cards are not transcript rows, so give them their own share menu.
+private struct MobileStandaloneShareMenu: ViewModifier {
+    let enabled: Bool
+    let text: String
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.contextMenu {
+                ShareLink(item: text) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+            }
+        } else {
+            content
+        }
     }
 }
 
