@@ -388,7 +388,8 @@ def test_ticket_used_by_a_different_upgrade_after_revoke_is_refused(relay_factor
     pairing = relay.bridge.pair()
     ticket = relay.bridge.mint_ticket(pairing)
     with relay.bridge.http as client:
-        assert client.delete(f"/v1/devices/{pairing.device_id}").status_code == 200
+        headers = {"Authorization": "Bearer " + relay.bridge.mint_ticket(pairing).ticket}
+        assert client.delete(f"/v1/devices/{pairing.device_id}", headers=headers).status_code == 200
 
     run(assert_upgrade_refused(relay.ws_url(ticket.ticket)))
     assert relay.gateway.connections == []
@@ -424,7 +425,8 @@ def test_revoking_a_device_kills_its_unused_ticket(relay_factory):
     pairing = relay.bridge.pair()
     ticket = relay.bridge.mint_ticket(pairing)
     with relay.bridge.http as client:
-        client.delete(f"/v1/devices/{pairing.device_id}")
+        headers = {"Authorization": "Bearer " + relay.bridge.mint_ticket(pairing).ticket}
+        client.delete(f"/v1/devices/{pairing.device_id}", headers=headers)
 
     run(assert_upgrade_refused(relay.ws_url(ticket.ticket)))
 
@@ -651,7 +653,8 @@ def test_revoking_a_device_drops_its_live_socket(relay_factory):
         await sock.expect(type="gateway.ready")
         await sock.handshake()
         with relay.bridge.http as client:
-            assert client.delete(f"/v1/devices/{pairing.device_id}").status_code == 200
+            headers = {"Authorization": "Bearer " + relay.bridge.mint_ticket(pairing).ticket}
+            assert client.delete(f"/v1/devices/{pairing.device_id}", headers=headers).status_code == 200
         try:
             frame = await sock.recv(timeout=1.5)
         except UpgradeRefused:
