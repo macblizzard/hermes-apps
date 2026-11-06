@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 import HermesKit
 import HermesRender
 import OpenBotUI
@@ -21,8 +20,11 @@ struct TranscriptRowView: View {
     var onSelectText: (String) -> Void = { _ in }
     @State private var showingReactions = false
     @AppStorage("mac.messageReactions.v1") private var storedReactions = "{}"
-    private static let speaker = AVSpeechSynthesizer()
     private static let emojis = ["👍", "❤️", "😂", "😮", "😢", "🎉"]
+    /// The window's one voice. `@ObservedObject` so the row repaints the moment another message
+    /// takes the speaker away from it.
+    @ObservedObject private var speech = SpeechReader.shared
+    @State private var isHovered = false
 
     private var reactionKey: String? {
         guard let session else { return nil }
@@ -71,11 +73,9 @@ struct TranscriptRowView: View {
     @ViewBuilder private var messageMenu: some View {
         if entry.role == .user || entry.role == .assistant {
             Button("Select Text") { onSelectText(entry.text) }
-            Button("Read Aloud") {
-                Self.speaker.stopSpeaking(at: .immediate)
-                Self.speaker.speak(AVSpeechUtterance(string: entry.text))
+            Button(isSpeaking ? "Stop Reading" : "Read Aloud") {
+                speech.toggle(id: entry.id, text: entry.text)
             }
-            Button("Stop Reading") { Self.speaker.stopSpeaking(at: .immediate) }
             if reactionKey != nil { Button("Add Local Reaction…") { showingReactions = true } }
         }
         ShareLink(item: entry.text) { Label("Share", systemImage: "square.and.arrow.up") }
@@ -127,8 +127,47 @@ struct TranscriptRowView: View {
     // MARK: Assistant
 
     private var assistantRow: some View {
-        MarkdownTextView(text: entry.text)
-            .accessibilityLabel("Hermes said: \(entry.text)")
+        VStack(alignment: .leading, spacing: 6) {
+            MarkdownTextView(text: entry.text)
+                .accessibilityLabel("Hermes said: \(entry.text)")
+
+            // Read aloud belongs on the message, not only in a context menu nobody right-clicks
+            // a reply to find. Quiet until hovered, so the prose still leads.
+            readAloudControl
+                .opacity(isHovered || isSpeaking ? 1 : 0.45)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onHover { isHovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+    }
+
+    // MARK: Read aloud
+
+    private var isSpeaking: Bool { speech.speakingEntryID == entry.id }
+
+    private var readAloudControl: some View {
+        Button {
+            speech.toggle(id: entry.id, text: entry.text)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isSpeaking ? "stop.fill" : "speaker.wave.2")
+                    .font(.system(size: 9, weight: .semibold))
+                Text(isSpeaking ? "Stop" : "Read aloud")
+                    .font(TypeScale.font(TypeScale.micro, weight: .medium))
+            }
+            .foregroundStyle(isSpeaking ? Tokens.accentText : Tokens.textMuted)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: Tokens.radiusSmall, style: .continuous)
+                    .fill(isSpeaking ? Tokens.controlActive : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isSpeaking ? "Stop reading this message" : "Read this message aloud")
+        .accessibilityLabel(isSpeaking ? "Stop reading this message" : "Read this message aloud")
+        .accessibilityIdentifier("message.readAloud")
     }
 
     // MARK: Tool
