@@ -385,6 +385,8 @@ struct DevicesScreen: View {
     @State private var allowedOverrides: [String: Bool] = [:]
     @State private var pendingRevoke: PairedDevice?
     @State private var showRevokeConfirm = false
+    @State private var pendingRemoval: PairedDevice?
+    @State private var showRemovalConfirm = false
 
     var body: some View {
         List {
@@ -398,6 +400,15 @@ struct DevicesScreen: View {
 
                 ForEach(app.devices) { device in
                     deviceRow(device)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            if device.revoked {
+                                Button("Remove", role: .destructive) {
+                                    pendingRemoval = device
+                                    showRemovalConfirm = true
+                                }
+                                .disabled(app.removingDevice || app.store.host == nil)
+                            }
+                        }
                 }
 
                 if app.devices.isEmpty {
@@ -415,7 +426,7 @@ struct DevicesScreen: View {
                     }
                 }
             } footer: {
-                Text("Turning a device off revokes it on the host. That cannot be undone — pair it again to give it access.")
+                Text("Turning a device off revokes it on the host. That cannot be undone — pair it again to give it access. Swipe a revoked device to remove its record.")
                     .font(TypeScale.font(TypeScale.label))
             }
         }
@@ -436,6 +447,18 @@ struct DevicesScreen: View {
         }
         .onChange(of: showRevokeConfirm) { presented in
             if !presented { restorePendingToggle() }
+        }
+        .confirmationDialog(pendingRemoval.map { "Remove \($0.name)?" } ?? "Remove this device?",
+                            isPresented: $showRemovalConfirm,
+                            titleVisibility: .visible) {
+            Button("Remove device", role: .destructive) {
+                guard let device = pendingRemoval else { return }
+                pendingRemoval = nil
+                Task { await app.removeRevoked(device) }
+            }
+            Button("Cancel", role: .cancel) { pendingRemoval = nil }
+        } message: {
+            Text("Permanently remove this revoked device's record from the host. This does not remove any other devices.")
         }
     }
 

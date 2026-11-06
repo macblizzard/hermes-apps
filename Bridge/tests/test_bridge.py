@@ -247,3 +247,43 @@ def test_remote_gateway_url_is_refused(tmp_path):
     )
     with pytest.raises(ConfigError):
         create_app(config)
+
+
+def test_permanent_cleanup_of_revoked_device(app_bridge):
+    c = client(app_bridge)
+    reg = app_bridge.state.bridge.registry
+    for device in ('admin', 'old'):
+        reg.add_device(device_id=device, name=device, platform='ios', public_key='pk', refresh_token=device+'-refresh')
+    old_ticket = c.post('/v1/token', json={'device_id': 'old', 'refresh_token': 'old-refresh'}).json()['ws_ticket']
+    assert c.delete('/v1/devices/old').status_code == 200
+    ticket = c.post('/v1/token', json={'device_id': 'admin', 'refresh_token': 'admin-refresh'}).json()['ws_ticket']
+    response = c.delete('/v1/devices/old/revoked', headers={'Authorization': 'Bearer '+ticket})
+    assert response.status_code == 200
+    assert reg.get('old') is None
+    assert all(d['device_id'] != 'old' for d in c.get('/v1/devices').json())
+    assert c.post('/v1/token', json={'device_id': 'old', 'refresh_token': 'old-refresh'}).status_code == 401
+    assert c.get('/v1/bot-icons', headers={'Authorization': 'Bearer '+old_ticket}).status_code == 401
+    assert c.delete('/v1/devices/old/revoked', headers={'Authorization': 'Bearer '+ticket}).status_code == 401
+
+
+def test_cleanup_requires_fresh_active_device_ticket_and_rejects_active(app_bridge):
+    c = client(app_bridge)
+    reg = app_bridge.state.bridge.registry
+    for device in ('admin', 'target', 'revoked'):
+        reg.add_device(device_id=device, name=device, platform='ios', public_key='pk', refresh_token=device+'-refresh')
+    def mint(device):
+        return c.post('/v1/token', json={'device_id': device, 'refresh_token': device+'-refresh'}).json()
+    revoked_ticket = mint('revoked')['ws_ticket']
+    reg.revoke('revoked')
+    path = '/v1/devices/target/revoked'
+    for headers in ({}, {'Authorization': 'Bearer invalid'},
+                    {'Authorization': 'Bearer '+revoked_ticket},
+                    {'Authorization': 'Bearer '+mint('admin')['access_token']}):
+        assert c.delete(path, headers=headers).status_code == 401
+    ticket = mint('admin')['ws_ticket']
+    assert c.delete(path, headers={'Authorization': 'Bearer '+ticket}).status_code == 409
+    assert reg.is_active('target')
+    assert c.delete(path, headers={'Authorization': 'Bearer '+ticket}).status_code == 401
+    ticket = mint('admin')['ws_ticket']
+    assert c.delete('/v1/devices/missing/revoked', headers={'Authorization': 'Bearer '+ticket}).status_code == 404
+    assert c.delete('/v1/devices/missing/revoked', headers={'Authorization': 'Bearer '+ticket}).status_code == 401

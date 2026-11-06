@@ -37,6 +37,7 @@ final class AppEnvironment: ObservableObject {
     @Published private(set) var devices: [PairedDevice] = []
     @Published private(set) var devicesLoading = false
     @Published private(set) var devicesError: String?
+    @Published private(set) var removingDevice = false
     @Published private(set) var botIcons: [String: BotIcon] = [:]
     @Published private(set) var botIconsError: String?
     private var iconGeneration = 0
@@ -306,6 +307,32 @@ final class AppEnvironment: ObservableObject {
             }
         } catch {
             devicesError = message(for: error)
+            Haptics.error()
+        }
+    }
+
+    func removeRevoked(_ device: PairedDevice) async {
+        guard !removingDevice else { return }
+        guard let current = devices.first(where: { $0.deviceID == device.deviceID }), current.revoked else {
+            devicesError = "Only revoked devices can be removed. Refresh the list and try again."
+            return
+        }
+        guard let host = store.host, let token = store.refreshToken else {
+            devicesError = "Cannot remove the device: this phone is not paired."
+            return
+        }
+        removingDevice = true
+        defer { removingDevice = false }
+        devicesError = nil
+        do {
+            try await bridge.removeRevoked(deviceID: current.deviceID, on: host, refreshToken: token)
+            await loadDevices()
+            if let error = devicesError {
+                devicesError = "Device removed, but the list could not refresh: \(error)"
+            }
+            Haptics.success()
+        } catch {
+            devicesError = "Could not remove \(current.name): \(message(for: error))"
             Haptics.error()
         }
     }

@@ -212,6 +212,21 @@ class DeviceRegistry:
             )
             conn.commit()
 
+    def delete_revoked(self, device_id: str) -> str:
+        """Atomically delete a revoked row; return deleted, active, or missing."""
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                "DELETE FROM devices WHERE device_id = ? AND revoked = 1", (device_id,)
+            )
+            if cur.rowcount:
+                result = "deleted"
+            else:
+                row = conn.execute("SELECT 1 FROM devices WHERE device_id = ?", (device_id,)).fetchone()
+                result = "active" if row else "missing"
+            conn.commit()
+            return result
+
     def verify_refresh(self, device_id: str, presented: str) -> Optional[Device]:
         """Return the device when the refresh token matches and it is not revoked."""
         device = self.get(device_id)

@@ -29,12 +29,13 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, Header, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
 
 from .audit import AuditLog
 from .bot_icons import create_bot_icons_router
 from .config import BridgeConfig, is_loopback_host
+from .device_auth import require_device
 from .pairing import InvalidPublicKey, normalize_public_key
 from .proxy import GatewayProxy, LiveSessions
 from .registry import DeviceRegistry
@@ -270,6 +271,17 @@ def create_app(
         # phone would keep streaming turns until it noticed. Close it from this side.
         closed = await runtime.live.close_device(device_id)
         return {"revoked": device_id, "sockets_closed": closed}
+
+    @app.delete("/v1/devices/{device_id}/revoked")
+    def delete_revoked_device(device_id: str, authorization: Optional[str] = Header(default=None)) -> dict:
+        require_device(runtime, authorization)
+        result = runtime.registry.delete_revoked(device_id)
+        if result == "active":
+            raise HTTPException(status_code=409, detail="device is not revoked")
+        if result == "missing":
+            raise HTTPException(status_code=404, detail="unknown device")
+        runtime.tickets.revoke_device(device_id)
+        return {"deleted": device_id}
 
     @app.websocket("/v1/ws")
     async def ws_proxy(websocket: WebSocket) -> None:

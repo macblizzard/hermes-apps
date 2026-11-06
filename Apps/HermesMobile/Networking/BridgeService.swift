@@ -16,6 +16,8 @@ protocol BridgeServiceProtocol: Sendable {
     /// `DELETE /v1/devices/{id}` — permanent on the bridge, and it kills outstanding
     /// tickets immediately.
     func revoke(deviceID: String, on host: PairedHost) async throws
+    /// Permanently remove one already-revoked device using a fresh single-use ticket.
+    func removeRevoked(deviceID: String, on host: PairedHost, refreshToken: String) async throws
 }
 
 struct PairClaim {
@@ -115,6 +117,23 @@ struct LiveBridgeService: BridgeServiceProtocol, @unchecked Sendable {
         var request = URLRequest(url: host.baseURL.appendingPathComponent("v1/devices/\(deviceID)"))
         request.httpMethod = "DELETE"
         _ = try await send(request)
+    }
+
+    func removeRevoked(deviceID: String, on host: PairedHost, refreshToken: String) async throws {
+        do {
+            let body = TokenBody(deviceID: host.deviceID, refreshToken: refreshToken)
+            let ticket: TokenResponse = try await post("v1/token", base: host.baseURL, body: body)
+            let url = host.baseURL.appendingPathComponent("v1/devices")
+                .appendingPathComponent(deviceID).appendingPathComponent("revoked")
+            var request = URLRequest(url: url)
+            request.httpMethod = "DELETE"
+            request.setValue("Bearer \(ticket.wsTicket)", forHTTPHeaderField: "Authorization")
+            _ = try await send(request)
+        } catch BridgeError.http(status: 401, message: _) {
+            throw BridgeError.http(status: 401, message: "Authentication failed. Reconnect or pair this phone again.")
+        } catch BridgeError.http(status: 409, message: let detail) {
+            throw BridgeError.http(status: 409, message: detail ?? "The device cannot be removed because it is not revoked.")
+        }
     }
 
     // MARK: Plumbing
@@ -286,4 +305,5 @@ struct PreviewBridgeService: BridgeServiceProtocol {
     }
 
     func revoke(deviceID: String, on host: PairedHost) async throws {}
+    func removeRevoked(deviceID: String, on host: PairedHost, refreshToken: String) async throws {}
 }

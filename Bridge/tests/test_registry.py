@@ -123,3 +123,34 @@ def test_public_key_is_kept_for_future_signature_checks(tmp_path):
         assert reg.get("dev-6").public_key == "PUBLICKEY"
     finally:
         reg.close()
+
+
+def test_cleanup_waits_for_concurrent_state_change_and_never_deletes_active(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    reg = make_registry(tmp_path)
+    reg.add_device(device_id='race', name='race', platform='ios', public_key='pk', refresh_token='secret')
+    reg.revoke('race')
+    with sqlite3.connect(reg.path) as writer, ThreadPoolExecutor(max_workers=1) as pool:
+        writer.execute('BEGIN IMMEDIATE')
+        writer.execute('UPDATE devices SET revoked = 0 WHERE device_id = ?', ('race',))
+        started = threading.Event()
+        def cleanup():
+            started.set()
+            return reg.delete_revoked('race')
+        future = pool.submit(cleanup)
+        assert started.wait(2)
+        writer.commit()
+        assert future.result(timeout=5) == 'active'
+    assert reg.is_active('race')
+    reg.revoke('race')
+    assert reg.delete_revoked('race') == 'deleted'
+    reg.touch('race')
+    assert not reg.rotate_refresh('race', 'new')
+    assert reg.delete_revoked('race') == 'missing'
+    reg.close()
+    reopened = make_registry(tmp_path)
+    assert reopened.get('race') is None
+    assert reopened.verify_refresh('race', 'secret') is None
+    reopened.close()
