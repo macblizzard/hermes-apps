@@ -64,6 +64,15 @@ struct WorkspaceCommands: Commands {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        // The app menu's About item: replaced so it reports this build's version — the app is
+        // sideloaded unsigned, so the bundle's own numbers are the only truth about which build
+        // is running, and the stock panel showed a placeholder without them.
+        CommandGroup(replacing: .appInfo) {
+            Button("About Hermes") {
+                AppVersion.showStandardPanel()
+            }
+        }
+
         // No "New Session": a bot has exactly one conversation, so there is nothing to create.
         CommandGroup(replacing: .newItem) {
             Button("Pair Host…") {

@@ -31,6 +31,11 @@ struct MacSettingsView: View {
             ConnectionSettingsTab(store: store,
                                   openDevices: { openWindow(id: "paired-devices") })
                 .tabItem { Label("Connection", systemImage: "bolt.horizontal") }
+
+            // Fourth, not first: a version number is something a user goes looking for, and it
+            // reports the build CI stamped rather than anything this file could guess.
+            AboutSettingsTab(store: store)
+                .tabItem { Label("About", systemImage: "info.circle") }
         }
         .frame(width: 560, height: 468)
         .background(Tokens.canvas)
