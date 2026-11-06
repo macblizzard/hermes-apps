@@ -395,6 +395,8 @@ struct ConversationScreen: View {
                 pendingAttachmentsBar
             }
 
+            voiceRow
+
             Hairline(color: Tokens.border)
 
             Composer(text: $model.draft,
@@ -403,13 +405,38 @@ struct ConversationScreen: View {
                      isDisabled: sessionID == nil,
                      onSend: { Task { await model.send() } },
                      onAttach: { showAttachmentPicker = true },
-                     onMic: { notice = "Dictation arrives with the voice milestone." },
+                     onMic: { toggleRecording() },
                      onInterrupt: { Task { await model.interrupt() } })
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
                 .padding(.bottom, 8)
         }
         .background(Tokens.canvas)
+    }
+
+    /// The microphone and the "speak replies" opt-in, on one quiet line above the field.
+    ///
+    /// A transcript fills the draft and never sends on its own: misrecognition is common
+    /// enough that the user should see the words before they leave the phone. Speaking is
+    /// opt-in per visit and only starts for replies that arrive while it is on.
+    private var voiceRow: some View {
+        HStack(spacing: 8) {
+            VoiceRecordButton(controller: voice,
+                              isEnabled: sessionID != nil,
+                              onTranscript: insertTranscript)
+            VoiceSpeakerToggle(controller: voice,
+                               isEnabled: Binding(get: { speakReplies },
+                                                  set: { enabled in
+                                                      speakReplies = enabled
+                                                      // History is not replayed: mark what exists now.
+                                                      if enabled {
+                                                          lastSpokenEntryID = lastAssistantReply?.id
+                                                      }
+                                                  }),
+                               hasReply: lastAssistantReply != nil)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 4)
     }
 
     /// Picked attachments wait here until the user sends, so cancelling the composer uploads nothing.
@@ -513,6 +540,44 @@ struct ConversationScreen: View {
                 set: { presented in
                     if !presented { notice = nil }
                 })
+    }
+
+    // MARK: Voice
+
+    /// The reply the speaker toggle would repeat: the newest assistant row on screen.
+    private var lastAssistantReply: TranscriptEntry? {
+        model.transcript.last { $0.role == .assistant && !$0.text.isEmpty }
+    }
+
+    private func toggleRecording() {
+        // Refresh first: the pairing may have changed since this screen appeared.
+        voice.transport = app.makeVoiceTransport()
+        if voice.state == .recording {
+            voice.stopAndTranscribe(onTranscript: insertTranscript)
+        } else {
+            voice.startRecording()
+        }
+    }
+
+    /// Put the transcript where the user can read it before it is sent: replace an empty
+    /// draft, otherwise append as a new sentence. Sending stays a deliberate tap.
+    private func insertTranscript(_ text: String) {
+        let spoken = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !spoken.isEmpty else { return }
+        let existing = model.draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        model.draft = existing.isEmpty ? spoken : existing + " " + spoken
+    }
+
+    /// Speak a reply only when it is new and the toggle was already on. The same row is
+    /// never spoken twice, and toggling on marks the current reply as seen.
+    private func speakNewReplyIfNeeded() {
+        guard speakReplies, voice.state == .idle else { return }
+        guard let reply = lastAssistantReply,
+              !reply.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard reply.id != lastSpokenEntryID else { return }
+        lastSpokenEntryID = reply.id
+        voice.transport = app.makeVoiceTransport()
+        voice.speak(reply.text)
     }
 
     /// Scroll after the keyboard's safe-area animation has settled, not when focus first

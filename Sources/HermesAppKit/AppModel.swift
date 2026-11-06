@@ -168,6 +168,10 @@ public final class AppModel: ObservableObject {
 
     // MARK: Composer
 
+    /// Last message exchanged per bot, so the list can order by real activity rather than by
+    /// whichever chat was merely opened. Persisted per host: it is a UI fact, not host state.
+    @Published public private(set) var botActivity: [String: Date] = [:]
+
     @Published public var draft: String = ""
     /// Picked but not yet sent. Held locally so a cancelled composer leaves nothing on the host.
     @Published public private(set) var pendingAttachments: [PendingAttachment] = []
@@ -206,6 +210,7 @@ public final class AppModel: ObservableObject {
             try await client.connect()
             connection = .connected
             await observeEvents()
+            loadBotActivity()
             await loadBots()
             await loadModelLabel()
             await loadSessions()
@@ -419,6 +424,7 @@ public final class AppModel: ObservableObject {
         sending = true
         lastSendError = nil
         draft = ""
+        if let bot = selectedBotID { recordActivity(for: bot) }
 
         // Attachments are uploaded *before* the turn so a failure cannot leave a phantom message
         // in the transcript, and so a file's `@file:` reference can travel in the same prompt.
@@ -684,6 +690,27 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Bot activity
+
+    /// A message — either direction — is the only thing that reorders the bot list.
+    public func recordActivity(for botID: String, at date: Date = Date()) {
+        guard !botID.isEmpty else { return }
+        if let existing = botActivity[botID], existing >= date { return }
+        botActivity[botID] = date
+        persistBotActivity()
+    }
+
+    private var botActivityKey: String { "hermes.botActivity.\(hostName)" }
+
+    private func loadBotActivity() {
+        guard let raw = Self.defaults.dictionary(forKey: botActivityKey) as? [String: Double] else { return }
+        botActivity = raw.mapValues(Date.init(timeIntervalSince1970:))
+    }
+
+    private func persistBotActivity() {
+        Self.defaults.set(botActivity.mapValues(\.timeIntervalSince1970), forKey: botActivityKey)
+    }
+
     // MARK: Per-bot model
 
     /// The model menu for one bot. Scoped, because each profile has its own catalogue and its own
@@ -890,6 +917,7 @@ public final class AppModel: ObservableObject {
             reasoningText += text
         case .messageComplete(let session, let text):
             guard session == selectedSessionID else { return }
+            if let bot = selectedBotID { recordActivity(for: bot) }
             // A completion with no text would otherwise leave a blank bubble beside the streamed
             // one; the deltas already hold the reply.
             let finalText = text.isEmpty ? streamingText : text

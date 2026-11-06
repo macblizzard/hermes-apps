@@ -54,12 +54,15 @@ struct VoiceService {
     // MARK: - Plumbing
 
     private func post<Body: Encodable, Reply: Decodable>(_ path: String, body: Body) async throws -> Reply {
+        // Minted inside this call: a ticket is spent by exactly one request, so it can
+        // never be shared with a socket or with the previous voice request.
+        let ticket = try await freshTicket()
         var request = URLRequest(url: baseURL.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.timeoutInterval = 45
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Bearer \(try await freshTicket())", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(ticket)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONEncoder().encode(body)
 
         let (data, response) = try await session.data(for: request)

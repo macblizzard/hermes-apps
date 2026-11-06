@@ -52,7 +52,7 @@ struct BotListScreen: View {
     }
 
     private var filtered: [Bot] {
-        let ordered = LastOpenedBot.order(model.bots, lastOpenedID: lastOpenedID)
+        let ordered = BotActivityOrder.order(model.bots, activity: model.botActivity)
         guard !trimmedQuery.isEmpty else { return ordered }
         return ordered.filter { bot in
             bot.displayName.localizedCaseInsensitiveContains(trimmedQuery)
