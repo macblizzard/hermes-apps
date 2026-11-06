@@ -202,6 +202,59 @@ struct AttachmentPhotos: UIViewControllerRepresentable {
     }
 }
 
+struct AttachmentFiles: UIViewControllerRepresentable {
+    let completion: (Result<AttachmentPayload, Error>) -> Void
+    let cancel: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(completion: completion, cancel: cancel) }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        // `asCopy: true` hands back a file this app owns. The provider's original URL is
+        // security-scoped, and an iCloud item can still be a placeholder: reading it without a
+        // copy is what made "pick a file from Files" look like nothing happened at all.
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: true)
+        picker.allowsMultipleSelection = false
+        picker.shouldShowFileExtensions = true
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ controller: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let completion: (Result<AttachmentPayload, Error>) -> Void
+        let cancel: () -> Void
+
+        init(completion: @escaping (Result<AttachmentPayload, Error>) -> Void,
+             cancel: @escaping () -> Void) {
+            self.completion = completion
+            self.cancel = cancel
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController,
+                            didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first else {
+                DispatchQueue.main.async { self.cancel() }
+                return
+            }
+            // A coordinated read of a large file is long enough to freeze the composer, so the
+            // bytes are read off the main thread and only the payload crosses back.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let result: Result<AttachmentPayload, Error>
+                do { result = .success(try AttachmentRead.file(at: url)) }
+                catch { result = .failure(error) }
+                DispatchQueue.main.async { self.completion(result) }
+            }
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            cancel()
+        }
+    }
+}
+
 struct AttachmentCamera: UIViewControllerRepresentable {
     let completion: (Result<AttachmentPayload, Error>) -> Void
     let cancel: () -> Void

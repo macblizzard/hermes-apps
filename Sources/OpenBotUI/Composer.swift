@@ -15,6 +15,7 @@ public struct Composer: View {
     private let isSending: Bool
     private let isDisabled: Bool
     private let queuedCount: Int
+    private let hasAttachments: Bool
     private let showsAttach: Bool
     private let showsMic: Bool
     private let hint: String?
@@ -30,6 +31,7 @@ public struct Composer: View {
                 isSending: Bool = false,
                 isDisabled: Bool = false,
                 queuedCount: Int = 0,
+                hasAttachments: Bool = false,
                 showsAttach: Bool = true,
                 showsMic: Bool = true,
                 hint: String? = Composer.defaultHint,
@@ -42,6 +44,7 @@ public struct Composer: View {
         self.isSending = isSending
         self.isDisabled = isDisabled
         self.queuedCount = queuedCount
+        self.hasAttachments = hasAttachments
         self.showsAttach = showsAttach
         self.showsMic = showsMic
         self.hint = hint
@@ -70,8 +73,10 @@ public struct Composer: View {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// A pending attachment is sendable on its own: a file with no comment is a complete message,
+    /// and disabling the arrow there made the attach feature look broken.
     private var canSend: Bool {
-        !isDisabled && !isSending && !trimmed.isEmpty
+        !isDisabled && !isSending && (!trimmed.isEmpty || hasAttachments)
     }
 
     public var body: some View {
