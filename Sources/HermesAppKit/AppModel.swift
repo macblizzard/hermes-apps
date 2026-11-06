@@ -706,13 +706,13 @@ public final class AppModel: ObservableObject {
     // MARK: Bot activity
 
     /// A message — either direction — is the only thing that reorders the bot list.
-    public func toggleHidden(_ botID: String) {
+    public func toggleHidden(botID: String) {
         guard !botID.isEmpty else { return }
         if hiddenBots.contains(botID) { hiddenBots.remove(botID) } else { hiddenBots.insert(botID) }
         Self.defaults.set(Array(hiddenBots), forKey: hiddenKey)
     }
 
-    public func isHidden(_ botID: String) -> Bool { hiddenBots.contains(botID) }
+    public func isHidden(botID: String) -> Bool { hiddenBots.contains(botID) }
 
     /// The bots this device chooses to show: pinned first, then by last message.
     public var orderedBots: [Bot] {
