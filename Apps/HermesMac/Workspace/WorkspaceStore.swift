@@ -6,7 +6,7 @@ import OpenBotUI
 import SwiftUI
 
 /// Everything the macOS shell owns that `AppModel` does not: the pairing, the palette, the
-/// pane geometry and the per-session drafts.
+/// pane geometry and the per-bot drafts.
 ///
 /// `AppModel` stays the single source of truth for what is on the wire. This type is the
 /// window around it — and it is deliberately the only place that knows both a
@@ -23,8 +23,6 @@ final class WorkspaceStore: ObservableObject {
 
     @Published var isPairSheetPresented = false
     @Published var isPalettePresented = false
-    @Published var searchText = ""
-    @Published var showsContextPanel = true
     /// The bot whose settings sheet is open; `nil` closes it. Both the sidebar's context menu and
     /// the conversation's menu set this, so there is one sheet and one owner.
     @Published var botSettingsBot: Bot? = nil
@@ -33,9 +31,9 @@ final class WorkspaceStore: ObservableObject {
     private var iconGeneration = 0
     /// The open bot's own profile default, for the header chip.
     ///
-    /// `AppModel.modelLabel` is read once per connect and per endless-session open; the Mac opens
-    /// plain sessions, so after a bot switch it would still name the previous bot. This asks the
-    /// same profile-scoped catalogue call and is refreshed whenever the open bot changes.
+    /// `AppModel.modelLabel` is read once per connect and once per conversation open; after a bot
+    /// switch it could still name the previous bot. This asks the same profile-scoped catalogue
+    /// call and is refreshed whenever the open bot changes.
     @Published private(set) var openBotModelLabel: String?
     @Published private(set) var sidebarWidth: CGFloat = Geometry.sidebarDefault
 
@@ -45,10 +43,14 @@ final class WorkspaceStore: ObservableObject {
 
     private let pairingStore = PairingStore()
     private var latencyTask: Task<Void, Never>?
-    private var drafts: [SessionID: String] = [:]
+    /// Unsent text per bot plus a generation token. A slow open for an older selection cannot
+    /// restore its draft over the bot the user is on now.
+    private var drafts = BotDraftLedger()
+    /// The bot whose canonical conversation this window last opened, so a reconnect does not
+    /// resume the same thread a second time and interrupt what is already on screen.
+    private var openedBotID: String?
 
     private static let widthKey = "hermes.workspace.sidebarWidth"
-    private static let contextKey = "hermes.workspace.showsContext"
 
     // MARK: Init
 
@@ -60,6 +62,7 @@ final class WorkspaceStore: ObservableObject {
         } else {
             model = AppModel(client: UnpairedGatewayClient(), hostName: "hermes")
         }
+        bindDraftCallbacks()
         restorePreferences()
     }
 
@@ -67,7 +70,17 @@ final class WorkspaceStore: ObservableObject {
     init(model: AppModel, pairing: PairingAddress? = nil) {
         self.model = model
         self.pairing = pairing
+        bindDraftCallbacks()
         restorePreferences()
+    }
+
+    /// The model may outlive a selection, so tell the draft ledger when the host actually
+    /// consumed a steer. Without this, switching away while a steer is on the wire parks the
+    /// words and offers them again when the user comes back, even though they were accepted.
+    private func bindDraftCallbacks() {
+        model.onDraftConsumed = { [weak self] botID, text in
+            self?.drafts.consumeAccepted(botID: botID, text: text)
+        }
     }
 
     // MARK: Derived
@@ -80,14 +93,22 @@ final class WorkspaceStore: ObservableObject {
 
     var canSend: Bool {
         model.selectedSessionID != nil
-            && !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !model.isStreaming
+            && !model.isSteering
+            && (!model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !model.pendingAttachments.isEmpty)
     }
+
+    /// Text in the composer while the selected bot's turn is still running. Attachments are
+    /// allowed through this gate so pressing Steer surfaces the model's explanation instead of
+    /// making the control look dead.
+    var canSteer: Bool { model.canSteer }
 
     var canInterrupt: Bool { model.isStreaming || model.sending }
 
     var connectionLabel: String { model.connection.label }
 
-    /// The bot whose sessions are on screen. Nil while the list is still empty, which is
+    /// The bot whose conversation is on screen. Nil while the directory is still empty, which is
     /// what lets the sidebar say "no bots" rather than borrow a name.
     var selectedBot: Bot? { model.selectedBot }
 
@@ -128,31 +149,36 @@ final class WorkspaceStore: ObservableObject {
     /// to the bot that is no longer selected.
     func loadBots() async {
         await model.loadBots()
-        await model.loadSessions()
         await loadBotIcons()
+        await openSelectedBotConversation()
     }
 
-    /// Switch the workspace to another bot: sessions and conversation follow, and the
-    /// first session of the new bot opens so the pane never sits on the old transcript.
+    /// Switch the workspace to another bot and open its one shared conversation.
     ///
-    /// The composer is per-session state the model does not clear on a bot switch, so the
-    /// draft is parked under the session it was typed in and the field is emptied. Without
-    /// that, text meant for one bot would sit in the composer addressed to the next one.
+    /// The composer is per-bot state the model does not clear on a switch, so the draft is parked
+    /// under the bot it was typed for and the field is emptied. The conversation itself comes from
+    /// `AppModel.endlessSession`, which opens only the host's exact-title canonical row and creates
+    /// a fresh one when it is absent. This method never invents a device-local thread or adopts an
+    /// unrelated session.
     func selectBot(_ id: String) {
         guard id != model.selectedBotID else { return }
-        if let current = model.selectedSessionID {
-            drafts[current] = model.draft
-        }
+        let token = drafts.beginSwitch(from: model.selectedBotID, draft: model.draft)
         model.draft = ""
         Task { [weak self] in
             guard let self else { return }
-            await self.model.selectBot(id)
+            _ = await self.model.endlessSession(for: id)
+            // A newer switch owns the screen now: neither its bot nor its draft may be replaced
+            // by this slower answer.
+            guard self.drafts.isCurrent(token), self.model.selectedBotID == id else { return }
+            self.openedBotID = id
             // The chip names the bot on screen: re-read that bot's own default.
             await self.refreshOpenBotModelLabel()
-            if let first = self.model.sessions.first {
-                await self.model.select(first.id)
-                self.model.draft = self.drafts[first.id] ?? ""
-            }
+            guard self.drafts.isCurrent(token), self.model.selectedBotID == id else { return }
+            // Do not overwrite text typed while the conversation was opening.
+            guard self.model.draft.isEmpty,
+                  let restored = self.drafts.draft(for: id, token: token),
+                  !restored.isEmpty else { return }
+            self.model.draft = restored
         }
     }
 
@@ -170,7 +196,7 @@ final class WorkspaceStore: ObservableObject {
         if model.connection.isLive {
             startLatencyLoop()
             await loadBotIcons()
-            await openFirstSessionIfNeeded()
+            await openSelectedBotConversation()
         }
     }
 
@@ -180,6 +206,7 @@ final class WorkspaceStore: ObservableObject {
         if model.connection.isLive {
             startLatencyLoop()
             await loadBotIcons()
+            await openSelectedBotConversation()
         }
     }
 
@@ -199,7 +226,9 @@ final class WorkspaceStore: ObservableObject {
         stopLatencyLoop()
         pairing = address
         model = WorkspaceStore.makeModel(for: address)
+        bindDraftCallbacks()
         drafts.removeAll()
+        openedBotID = nil
         connectAttempted = false
         isPairSheetPresented = false
     }
@@ -215,7 +244,9 @@ final class WorkspaceStore: ObservableObject {
         pairingStore.clear()
         pairing = nil
         model = AppModel(client: UnpairedGatewayClient(), hostName: "hermes")
+        bindDraftCallbacks()
         drafts.removeAll()
+        openedBotID = nil
         connectAttempted = false
     }
 
@@ -254,41 +285,23 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    // MARK: Sessions
+    // MARK: Conversation
 
-    /// Open a session, keeping each session's unsent draft with it.
-    func select(_ id: SessionID) {
-        guard id != model.selectedSessionID else { return }
-        if let current = model.selectedSessionID {
-            drafts[current] = model.draft
-        }
-        let restored = drafts[id] ?? ""
-        Task { [weak self] in
-            guard let self else { return }
-            await self.model.select(id)
-            self.model.draft = restored
-        }
-    }
-
-    func openFirstSessionIfNeeded() async {
-        guard model.selectedSessionID == nil, let first = model.sessions.first else { return }
-        await model.select(first.id)
-    }
-
-    func reloadSessions() {
-        Task { [weak self] in
-            await self?.model.loadSessions()
-        }
-    }
-
-    func newSession() {
-        Task { [weak self] in
-            guard let self else { return }
-            await self.model.newSession()
-            if let id = self.model.selectedSessionID {
-                self.drafts[id] = ""
-            }
-        }
+    /// Open the selected bot's host-canonical conversation if this window has not already done so.
+    func openSelectedBotConversation(force: Bool = false) async {
+        guard model.connection.isLive, let bot = model.selectedBotID else { return }
+        guard force || openedBotID != bot || model.selectedSessionID == nil else { return }
+        let token = drafts.currentToken
+        _ = await model.endlessSession(for: bot)
+        // The selection changed while the conversation was opening. Do not claim this bot as
+        // opened and do not write its draft over the current one.
+        guard drafts.isCurrent(token), model.selectedBotID == bot else { return }
+        openedBotID = bot
+        // Only restore parked text into an untouched composer; newer typing wins.
+        guard model.draft.isEmpty,
+              let restored = drafts.draft(for: bot, token: token),
+              !restored.isEmpty else { return }
+        model.draft = restored
     }
 
     // MARK: Turn
@@ -300,6 +313,13 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    func steer() {
+        guard canSteer else { return }
+        Task { [weak self] in
+            await self?.model.steer()
+        }
+    }
+
     func interrupt() {
         guard canInterrupt else { return }
         Task { [weak self] in
@@ -308,8 +328,11 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func retrySend() {
-        guard canSend else { return }
-        send()
+        if model.isStreaming {
+            steer()
+        } else {
+            send()
+        }
     }
 
     // MARK: Approvals
@@ -367,11 +390,6 @@ final class WorkspaceStore: ObservableObject {
         UserDefaults.standard.set(Double(sidebarWidth), forKey: WorkspaceStore.widthKey)
     }
 
-    func toggleContextPanel() {
-        showsContextPanel.toggle()
-        UserDefaults.standard.set(showsContextPanel, forKey: WorkspaceStore.contextKey)
-    }
-
     // MARK: Palette
 
     func openPalette() { isPalettePresented = true }
@@ -383,26 +401,6 @@ final class WorkspaceStore: ObservableObject {
         var items: [WorkspaceCommand] = []
 
         items.append(WorkspaceCommand(
-            id: "session.new",
-            title: "New session",
-            subtitle: "Ask the host for a fresh conversation",
-            systemImage: "plus.bubble",
-            shortcut: "⌘N",
-            group: .session,
-            isEnabled: model.connection.isLive,
-            run: { [weak self] in self?.newSession() }))
-
-        items.append(WorkspaceCommand(
-            id: "session.reload",
-            title: "Reload sessions",
-            subtitle: "Re-list conversations on the host",
-            systemImage: "arrow.clockwise",
-            shortcut: nil,
-            group: .session,
-            isEnabled: model.connection.isLive,
-            run: { [weak self] in self?.reloadSessions() }))
-
-        items.append(WorkspaceCommand(
             id: "turn.interrupt",
             title: "Interrupt the turn",
             subtitle: "Stop the running agent turn on this session",
@@ -411,6 +409,16 @@ final class WorkspaceStore: ObservableObject {
             group: .session,
             isEnabled: canInterrupt,
             run: { [weak self] in self?.interrupt() }))
+
+        items.append(WorkspaceCommand(
+            id: "turn.steer",
+            title: "Steer the running turn",
+            subtitle: "Send the composer text into the current turn",
+            systemImage: "arrow.up.circle",
+            shortcut: nil,
+            group: .session,
+            isEnabled: canSteer,
+            run: { [weak self] in self?.steer() }))
 
         items.append(WorkspaceCommand(
             id: "host.connect",
@@ -455,19 +463,23 @@ final class WorkspaceStore: ObservableObject {
             run: { [weak self] in self?.isPairSheetPresented = true }))
 
         items.append(WorkspaceCommand(
-            id: "view.context",
-            title: showsContextPanel ? "Hide context panel" : "Show context panel",
-            subtitle: "The \(Int(Geometry.contextPanel)) pt column on the right",
-            systemImage: showsContextPanel ? "sidebar.right" : "sidebar.left",
-            shortcut: "⌘\\",
-            group: .view,
-            isEnabled: true,
-            run: { [weak self] in self?.toggleContextPanel() }))
+            id: "bot.settings",
+            title: "Bot settings…",
+            subtitle: selectedBot.map { "Icon, description and model for \($0.displayName)" }
+                ?? "Select a bot first",
+            systemImage: "gearshape",
+            shortcut: nil,
+            group: .bot,
+            isEnabled: selectedBot != nil,
+            run: { [weak self] in
+                guard let self, let bot = self.selectedBot else { return }
+                self.openBotSettings(bot)
+            }))
 
         items.append(WorkspaceCommand(
             id: "view.sidebar",
-            title: sidebarIsCompact ? "Expand session list" : "Collapse session list",
-            subtitle: "Switch between the 280 pt list and the 88 pt strip",
+            title: sidebarIsCompact ? "Expand bot list" : "Collapse bot list",
+            subtitle: "Switch between the full names and the 88 pt icon strip",
             systemImage: "sidebar.left",
             shortcut: nil,
             group: .view,
@@ -520,9 +532,6 @@ final class WorkspaceStore: ObservableObject {
         let saved = UserDefaults.standard.double(forKey: WorkspaceStore.widthKey)
         if saved > 0 {
             sidebarWidth = min(Geometry.sidebarMax, max(Geometry.sidebarCompact, CGFloat(saved)))
-        }
-        if UserDefaults.standard.object(forKey: WorkspaceStore.contextKey) != nil {
-            showsContextPanel = UserDefaults.standard.bool(forKey: WorkspaceStore.contextKey)
         }
     }
 

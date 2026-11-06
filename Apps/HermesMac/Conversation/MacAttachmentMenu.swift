@@ -16,6 +16,10 @@ struct MacAttachmentMenu: View {
     @ObservedObject var model: AppModel
     @Binding var isPresented: Bool
 
+    /// Two rows plus the menu's own padding; the composer offsets the overlay by this much so it
+    /// sits entirely above the input rather than covering it.
+    static let height: CGFloat = 60
+
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             item("Photos…", symbol: "photo") { chooseImages() }
@@ -24,6 +28,8 @@ struct MacAttachmentMenu: View {
         .padding(6)
         .frame(width: 180)
         .background(Tokens.sheet)
+        .clipShape(RoundedRectangle(cornerRadius: Tokens.radiusCard, style: .continuous))
+        .onExitCommand { isPresented = false }
     }
 
     private func item(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
@@ -129,6 +135,33 @@ struct MacAttachmentFile {
         guard bytes.count <= AppModel.maxAttachmentBytes else { throw Failure.tooLarge }
 
         return MacAttachmentFile(name: url.lastPathComponent, data: bytes, isImage: isImage)
+    }
+
+    /// The image currently on the native pasteboard, if any.
+    ///
+    /// This is the same file shape the picker returns, so `AppModel.addPendingAttachment` is the
+    /// only place validation happens and the upload path is unchanged. The common pasteboard
+    /// image types are tried by preference rather than silently accepting an unknown blob.
+    static func pastedImage(from pasteboard: NSPasteboard = .general) -> MacAttachmentFile? {
+        let candidates: [(UTType, String)] = [
+            (.png, "Pasted image.png"),
+            (.tiff, "Pasted image.tiff"),
+            (.jpeg, "Pasted image.jpg"),
+            (.heic, "Pasted image.heic"),
+        ]
+        for (type, name) in candidates {
+            let pasteboardType = NSPasteboard.PasteboardType(type.identifier)
+            if let data = pasteboard.data(forType: pasteboardType), !data.isEmpty {
+                return MacAttachmentFile(name: name, data: data, isImage: true)
+            }
+        }
+
+        // Some apps only advertise NSImage. Convert that representation to TIFF; the 8 MB limit
+        // still applies in `addPendingAttachment`, exactly as it does for a picked file.
+        guard let image = NSImage(pasteboard: pasteboard),
+              let data = image.tiffRepresentation,
+              !data.isEmpty else { return nil }
+        return MacAttachmentFile(name: "Pasted image.tiff", data: data, isImage: true)
     }
 
     private static func isImageFile(_ url: URL) -> Bool {

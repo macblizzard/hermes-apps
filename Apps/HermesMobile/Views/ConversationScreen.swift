@@ -128,7 +128,7 @@ struct ConversationScreen: View {
                 bot: bot,
                 load: { botID in try await model.modelCatalog(for: botID) },
                 conversationIsOpen: true,
-                resetConversation: { model.resetEndlessSession(for: bot.id) },
+                resetConversation: { await model.resetEndlessSession(for: bot.id) },
                 save: { botID, option, confirmed in
                     switch try await model.configureModel(botID: botID, model: option.id,
                                                           provider: option.provider,
@@ -168,7 +168,7 @@ struct ConversationScreen: View {
             }
             Button("Keep it", role: .cancel) {}
         } message: {
-            Text("This phone forgets its thread with \(title) and starts a new one on the next message. The old conversation stays on the host, and you can still open it there.")
+            Text("This starts a new conversation with \(title) and gives it the shared title on the host. The old thread keeps its history; devices resolve the new title on their next open.")
         }
         .alert("Couldn’t add attachment", isPresented: noticeBinding) {
             Button("OK", role: .cancel) { notice = nil }
@@ -694,18 +694,16 @@ struct ConversationScreen: View {
         isOpening = false
     }
 
-    /// Forget this bot's stored session and open a fresh one. The old session is left on
-    /// the host — resetting is a phone-side decision about what to continue from.
+    /// Start a new conversation for this bot. The old thread keeps its history on the host and is
+    /// retitled there so the other device no longer resolves it as the shared conversation.
     private func resetConversation() async {
         Haptics.impact()
-        // Clears this bot's stored id and the thread on screen; the next open creates and
-        // stores a new session, so the composer is disabled until that lands.
-        model.resetEndlessSession(for: bot.id)
-        sessionID = nil
         isOpening = true
 
-        if let sid = await model.endlessSession(for: bot.id) {
-            sessionID = sid
+        await model.resetEndlessSession(for: bot.id)
+        sessionID = model.selectedSessionID
+        if sessionID == nil {
+            sessionID = await model.endlessSession(for: bot.id)
         }
 
         lastSeenRequestCount = model.pendingRequests.count

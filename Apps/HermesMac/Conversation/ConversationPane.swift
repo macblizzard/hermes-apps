@@ -37,7 +37,7 @@ struct ConversationPane: View {
                 }
             }
 
-            if openSession == nil {
+            if !hasConversation {
                 ConversationEmptyState(model: model, store: store)
             } else {
                 TranscriptScroll(model: model)
@@ -75,12 +75,11 @@ struct ConversationPane: View {
         }
     }
 
-    /// The transcript is only drawn for a session that is in the *current* bot's list.
-    /// A stale id left over from another bot must not paint one bot's messages under
-    /// another bot's header, so "open" means "present in `sessions`", not just non-nil.
-    private var openSession: SessionSummary? {
-        guard let id = model.selectedSessionID else { return nil }
-        return model.sessions.first { $0.id == id }
+    /// One conversation per bot means "open" is simply "this bot has a conversation attached".
+    /// The old check required the id to be in `sessions`, which hid a freshly created canonical
+    /// thread until the host happened to list it again.
+    private var hasConversation: Bool {
+        model.selectedBotID != nil && model.selectedSessionID != nil
     }
 
     private var bannerKind: ConnectionBanner.Kind? {
@@ -101,11 +100,8 @@ private struct ConversationEmptyState: View {
         if !store.isPaired { return "No host paired" }
         if !model.connection.isLive { return "Not connected" }
         if model.bots.isEmpty { return "No bots found on this host" }
-        if model.sessionsLoading && model.sessions.isEmpty {
-            return "Loading \(store.botTitle)'s conversations…"
-        }
-        if model.sessions.isEmpty { return "\(store.botTitle) has no sessions yet" }
-        return "No conversation selected"
+        if model.selectedBotID == nil { return "No bot selected" }
+        return "Opening \(store.botTitle)'s conversation…"
     }
 
     private var subtitle: String {
@@ -113,18 +109,15 @@ private struct ConversationEmptyState: View {
             return "Paste your host's wss:// URL and device token. Nothing leaves this Mac until you do."
         }
         if !model.connection.isLive {
-            return "Connect to \(store.pairing?.displayHost ?? model.hostName) to load its sessions."
+            return "Connect to \(store.pairing?.displayHost ?? model.hostName) to load its bots."
         }
         if model.bots.isEmpty {
             return "The gateway answered, but listed no profiles. Check that this host has a Hermes bot to talk to, then check again."
         }
-        if model.sessionsLoading && model.sessions.isEmpty {
-            return "The host is listing this bot's sessions."
+        if model.selectedBotID == nil {
+            return "Pick a bot in the sidebar to continue the one conversation you share with it."
         }
-        if model.sessions.isEmpty {
-            return "Start one here, or switch bots in the rail."
-        }
-        return "Pick a session in the list, or start a new one."
+        return "Reading the host's shared conversation with \(store.botTitle)."
     }
 
     private var icon: String {
@@ -169,12 +162,12 @@ private struct ConversationEmptyState: View {
                     Task { await store.loadBots() }
                 }
             } else {
-                OpenBotButton("New session", systemImage: "square.and.pencil", kind: .secondary, size: .small) {
-                    store.newSession()
+                OpenBotButton("Open conversation", systemImage: "bubble.left", kind: .secondary, size: .small) {
+                    Task { await store.openSelectedBotConversation(force: true) }
                 }
             }
 
-            Text("⌘K commands · ⌘↩ send · ⌘. interrupt")
+            Text("⌘K commands · ⌘↩ send or steer · ⌘. interrupt")
                 .font(TypeScale.font(TypeScale.caption))
                 .foregroundStyle(Tokens.textDim)
                 .padding(.top, 4)

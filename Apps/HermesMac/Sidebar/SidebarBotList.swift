@@ -5,9 +5,9 @@ import SwiftUI
 
 /// The bots block at the top of the left pane.
 ///
-/// The rail's avatars stay the fastest switch; this list is the phone's bot list brought to the
-/// desktop: the profile's description under its name, a green dot for a reply that arrived while
-/// the conversation was not on screen, pin/hide from the row's context menu, and one filter in the
+/// The single bot switcher on the desktop. It is the phone's bot list brought to the desktop:
+/// the profile's description under its name, a green dot for a reply that arrived while the
+/// conversation was not on screen, pin/hide from the row's context menu, and one filter in the
 /// block's own caption row so a hidden bot is never out of reach.
 ///
 /// Ordering is `AppModel.orderedBots` — pinned first, then last activity — so both surfaces agree.
@@ -16,6 +16,9 @@ struct SidebarBotList: View {
     @ObservedObject var store: WorkspaceStore
     /// View preference, not a stored one: hidden bots stay hidden across launches via the model.
     @Binding var showsHiddenBots: Bool
+    /// The full-height sidebar lets the bot list take the pane; the settings preview uses the
+    /// original compact five-row block.
+    var fillsAvailableHeight: Bool = false
 
     /// Hidden bots are excluded by the model's ordering, so this is the visible list.
     private var visibleBots: [Bot] { model.orderedBots }
@@ -59,6 +62,18 @@ struct SidebarBotList: View {
 
             Spacer(minLength: 4)
 
+            OpenBotIconButton("magnifyingglass",
+                              label: "Command palette (⌘K)",
+                              size: .small) {
+                store.openPalette()
+            }
+
+            if store.isPaired {
+                OpenBotIconButton("link", label: "Pair host…", size: .small) {
+                    store.isPairSheetPresented = true
+                }
+            }
+
             Menu {
                 // Same control as the phone's list filter: a switch, not a second list.
                 Toggle("Show hidden bots", isOn: $showsHiddenBots)
@@ -99,7 +114,7 @@ struct SidebarBotList: View {
                 }
             }
         }
-        .frame(height: listHeight)
+        .frame(height: fillsAvailableHeight ? nil : listHeight)
     }
 
     private func row(for bot: Bot) -> some View {
@@ -113,9 +128,11 @@ struct SidebarBotList: View {
         } label: {
             HStack(alignment: .center, spacing: 8) {
                 if let icon = store.botIcons[bot.id] {
-                    BotIconPortrait(icon, size: 26, isWorking: bot.id == model.selectedBotID && model.isStreaming)
+                    BotIconPortrait(icon, size: 30, isWorking: model.isBotWorking(bot.id))
                 } else {
-                    Avatar(bot.displayName, size: .small, presence: presence(for: bot), initials: bot.avatarInitials)
+                    Avatar(bot.displayName, size: .small,
+                           presence: presence(for: bot),
+                           initials: bot.avatarInitials)
                 }
 
                 VStack(alignment: .leading, spacing: 1) {
@@ -188,6 +205,14 @@ struct SidebarBotList: View {
             model.toggleHidden(botID: bot.id)
         } label: {
             HStack(spacing: 8) {
+                if let icon = store.botIcons[bot.id] {
+                    BotIconPortrait(icon, size: 22, isWorking: model.isBotWorking(bot.id))
+                } else {
+                    Avatar(bot.displayName, size: .small,
+                           presence: presence(for: bot),
+                           initials: bot.avatarInitials)
+                }
+
                 Text(bot.displayName)
                     .font(TypeScale.font(Tokens.textSM))
                     .foregroundStyle(Tokens.textMuted)
@@ -236,18 +261,20 @@ struct SidebarBotList: View {
         return bot.id == bot.displayName ? "Hermes profile" : bot.id
     }
 
-    /// Live state is only known for the bot whose sessions are loaded; the rest stay idle rather
+    /// Live state is only known for the bot this client is attached to; the rest stay idle rather
     /// than borrowing the selected bot's ring.
     private func presence(for bot: Bot) -> Avatar.Presence {
         guard bot.id == model.selectedBotID else { return .idle }
         if model.hasPendingRequests { return .needsYou }
-        if model.isStreaming { return .running }
+        if model.isBotWorking(bot.id) { return .running }
         return .idle
     }
 
     private func accessibilityLabel(for bot: Bot) -> String {
         var parts = [bot.displayName, "bot"]
+        if bot.id == model.selectedBotID { parts.append("selected") }
         if model.isPinned(botID: bot.id) { parts.append("pinned") }
+        if model.isBotWorking(bot.id) { parts.append("working") }
         if model.hasUnread(bot.id) { parts.append("unread") }
         return parts.joined(separator: ", ")
     }

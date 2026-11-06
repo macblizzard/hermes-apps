@@ -60,10 +60,46 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
     /// _create_session`). Without the argument a new session always lands in whichever profile the
     /// gateway defaults to, which is how a user ends up typing into the wrong bot.
     func createSession(model: String?, provider: String?, profile: String?) async throws -> SessionID
+    /// Create a session inside one bot with a title on the row.
+    ///
+    /// The title is written by the host (`session.create {title}` is its `pending_title`), which is
+    /// what lets a later exact-title lookup find the same conversation from another device. The
+    /// default implementation keeps older clients source-compatible, but a client that offers
+    /// cross-device conversation identity must implement this overload.
+    func createSession(model: String?, provider: String?,
+                       profile: String?, title: String?) async throws -> SessionID
     func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry]
+
+    /// The host's conversation with an exact title, inside one bot, hidden rows included.
+    ///
+    /// This is the server-side identity behind "one continuous conversation per bot": Hermes
+    /// itself uses the exact title `Bot Chat` for its canonical bot conversation
+    /// (`tools/bot_mode_probe.py::BOT_CHAT_TITLE`), and `session.list {title}` resolves it in the
+    /// bot's own database rather than this device's `UserDefaults`. `nil` means the host has no
+    /// such row yet.
+    func sessionID(titled title: String, profile: String?) async throws -> SessionID?
+
+    /// The most recent human-facing conversation in a bot, as the host ranks it.
+    ///
+    /// Kept as a read-only wire capability. It is deliberately **not** used to resolve a bot's
+    /// shared conversation: the newest row can be an unrelated TUI or messaging thread, and
+    /// adopting it would both open the wrong history and retitle it. Exact-title lookup is the
+    /// only identity this client acts on.
+    func mostRecentSession(profile: String?) async throws -> SessionID?
+
+    /// Give the attached session a title (`session.title`).
+    ///
+    /// The session must already be live (resume/create), because the gateway addresses the title
+    /// call by the runtime id this client attached to.
+    func setSessionTitle(_ id: SessionID, title: String) async throws
 
     // Turns
     func submit(session: SessionID, text: String) async throws
+    /// Send text into the turn that is already running (`session.steer`).
+    ///
+    /// Text-only: a running turn has no attachment slot. Implementations translate the stored
+    /// session id the UI holds to the runtime id the live turn is addressed by, and this call
+    /// must never be emulated with `prompt.submit` (that starts a new turn and duplicates text).
     func steer(session: SessionID, text: String) async throws
     func interrupt(session: SessionID) async throws
     /// Rewind + resend. Must send `confirm_truncate` and prefer `truncate_before_row_id`.
@@ -477,6 +513,30 @@ public extension GatewayClientProtocol {
     /// A client that *can* scope must implement the profile-aware overload.
     func createSession(model: String?, provider: String?, profile: String?) async throws -> SessionID {
         try await createSession(model: model, provider: provider)
+    }
+
+    /// A client without title support cannot create a shared conversation. Saying so is better
+    /// than creating a second thread and pretending it is canonical.
+    func createSession(model: String?, provider: String?,
+                       profile: String?, title: String?) async throws -> SessionID {
+        _ = title
+        return try await createSession(model: model, provider: provider, profile: profile)
+    }
+
+    /// Previews/unpaired clients have no host-side directory to search.
+    func sessionID(titled title: String, profile: String?) async throws -> SessionID? {
+        _ = (title, profile)
+        throw GatewayError.notConnected
+    }
+
+    func mostRecentSession(profile: String?) async throws -> SessionID? {
+        _ = profile
+        throw GatewayError.notConnected
+    }
+
+    func setSessionTitle(_ id: SessionID, title: String) async throws {
+        _ = (id, title)
+        throw GatewayError.notConnected
     }
 
     /// A client that cannot tell which model is current only has its menu. Reported as "no current

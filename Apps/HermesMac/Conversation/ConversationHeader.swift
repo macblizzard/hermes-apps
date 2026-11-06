@@ -4,23 +4,25 @@ import HermesKit
 import OpenBotUI
 import SwiftUI
 
-/// The strip above the transcript: which conversation, whether a turn is live, and the two
-/// controls that shape the window (context panel, more actions).
+/// The strip above the transcript: which bot, whether a turn is live, and the controls for the
+/// conversation. The bot *is* the conversation now, so the header never names a session row.
 struct ConversationHeader: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
 
     private var title: String {
-        model.selectedSession?.title ?? "New conversation"
+        store.selectedBot?.displayName ?? model.hostName
     }
 
     private var subtitle: String {
-        guard let session = model.selectedSession else {
-            return store.isPaired ? "not connected" : "no host paired"
+        guard store.selectedBot != nil else {
+            return store.isPaired ? "no bot selected" : "no host paired"
         }
-        var parts: [String] = [store.selectedBot?.displayName ?? model.hostName]
-        if let updated = session.updatedAt {
-            parts.append("updated \(RelativeTime.short(updated))")
+        var parts: [String] = []
+        if let description = store.selectedBot?.description, !description.isEmpty {
+            parts.append(description)
+        } else {
+            parts.append("one continuous conversation")
         }
         if !model.transcript.isEmpty {
             parts.append(model.transcript.count == 1 ? "1 entry" : "\(model.transcript.count) entries")
@@ -85,12 +87,6 @@ struct ConversationHeader: View {
                 store.openPalette()
             }
 
-            OpenBotIconButton("sidebar.right",
-                              label: store.showsContextPanel ? "Hide the context panel" : "Show the context panel",
-                              size: .small) {
-                store.toggleContextPanel()
-            }
-
             moreMenu
         }
         .padding(.horizontal, 18)
@@ -116,12 +112,7 @@ struct ConversationHeader: View {
                 Divider()
             }
             Button("Command palette…") { store.openPalette() }
-            Button("New session") { store.newSession() }
-                .disabled(!model.connection.isLive)
-                .keyboardShortcut("n", modifiers: [.command, .shift])
             Divider()
-            Button("Reload sessions") { store.reloadSessions() }
-                .disabled(!model.connection.isLive)
             Button("Pair host…") { store.isPairSheetPresented = true }
             Divider()
             if model.connection.isLive {

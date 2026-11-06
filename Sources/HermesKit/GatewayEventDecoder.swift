@@ -378,6 +378,22 @@ enum GatewayPayloadDecoder {
         }
     }
 
+    /// `session.most_recent` answers `{"session_id": <stored id or null>, "title": …}`.
+    ///
+    /// A missing/empty id is the host saying "this bot has no human-facing conversation yet", not
+    /// a malformed reply — and it must never be turned into a new session by the decoder.
+    static func mostRecentSession(_ result: JSONValue?) throws -> SessionID? {
+        guard let result, result.objectValue != nil else {
+            throw GatewayError.malformedResponse(method: "session.most_recent")
+        }
+        guard let value = result["session_id"], value != .null else { return nil }
+        guard let id = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !id.isEmpty else {
+            throw GatewayError.malformedResponse(method: "session.most_recent")
+        }
+        return id
+    }
+
     static func history(_ result: JSONValue?, limit: Int) throws -> [TranscriptEntry] {
         guard let messages = result?["messages"]?.arrayValue else {
             throw GatewayError.malformedResponse(method: "session.history")

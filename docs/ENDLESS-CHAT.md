@@ -11,15 +11,51 @@ Tapping a bot opens that bot's conversation. Leaving the conversation returns to
 
 ## 2. One endless conversation per bot
 
-There is **no session list** in the UI. Per bot the app persists exactly one session id:
+There is **no session list** in the UI. Hermes' canonical bot conversation is titled exactly
+`Bot Chat` (`tools/bot_mode_probe.py::BOT_CHAT_TITLE`, the value the Desktop's
+`createCanonicalChat` uses). The client asks `session.list {profile, title: "Bot Chat",
+include_hidden: true}` and treats an exact-title row as the row to open. The title is a discovery
+hint, **not a distributed lock and not a sync guarantee**.
 
-- On open: if `endlessSession[botID]` is stored and still resumable → resume it.
-- If missing, deleted or unresumable (`4001`/`4007`) → `session.create`, store the **stored** id
-  (`stored_session_id`), then resume.
-- "Reset conversation" lives in the conversation's overflow menu, behind a confirmation, and
-  clears only that bot's stored id (the old session is left on the host).
+Resolution order, each step verified against the host:
 
-Persistence: `UserDefaults`, key `hermes.endlessSession.<botID>`, value = stored session id.
+1. **Exact canonical title.** If a row exists, it is opened as-is; the client never rewrites its
+   title.
+2. **This device's saved id.** Only when no canonical row exists: resume
+   `hermes.endlessSession.<botID>` if the host still has it. This keeps pre-canonical and
+   device-local history reachable instead of silently replacing it with a fresh `Bot Chat`. The
+   resumed row is offered the canonical title as a best-effort publication step. If that write
+   fails, the history stays open, the id stays cached, and the error says plainly that sync is not
+   promised. A timeout/transport failure keeps the pointer; only a host "session not found"
+   (4001/4007) is treated as stale.
+3. **A fresh canonical row.** If there is neither an exact-title row nor a resumable local id,
+   create one (`session.create {profile, title: "Bot Chat"}`). The row is cached/attached only
+   after the host accepts the title write. If that write fails, the row is not claimed, no
+   existing history is replaced, and the failure is reported as a blocker.
+
+The client does **not** adopt the host's `session.most_recent {profile}` row: that can be an
+unrelated TUI or messaging thread, and titling it would overwrite a title the user chose.
+
+"Reset conversation" lives in the conversation's overflow menu, behind a confirmation. It is the
+one **user-initiated** retitle. The replacement is created and titled **before** the old row is
+renamed to `Bot Chat · previous <id>`; the old history stays intact. If the create, title, or
+archive step fails, the operation fails as a unit (the replacement is demoted and the old row
+remains canonical). Navigating to another bot while a reset is in flight cancels it and restores
+the old title, so history is never left archived with no replacement.
+
+### Explicit limitations (not sync guarantees)
+
+- **The canonical creation is not atomic.** Hermes provides no "find or create by unique title"
+  operation and does not enforce uniqueness of `Bot Chat`. Two devices that open a bot before
+  either has titled a row can each create their own canonical row. The client does not delete or
+  merge duplicates and does **not** claim race-safe convergence.
+- **Same-client concurrency is coalesced.** Two opens for one bot in this client wait on the same
+  resolution task, so they cannot both create a row. That is a local convenience, not a
+  cross-device guarantee.
+- **A title is not a distributed lock.** Another writer on the same profile can rename or delete
+  rows. The client resolves again on open; it does not assume the cached id survives. When a
+  title cannot be confirmed the app reports the blocker instead of presenting the thread as
+  shared.
 
 ## 3. Auto-compaction
 

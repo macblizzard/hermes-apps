@@ -275,16 +275,25 @@ public actor GatewayClient: GatewayClientProtocol {
     }
 
     public func createSession(model: String?, provider: String?) async throws -> SessionID {
-        try await createSession(model: model, provider: provider, profile: nil)
+        try await createSession(model: model, provider: provider, profile: nil, title: nil)
     }
 
     public func createSession(model: String?, provider: String?, profile: String?) async throws -> SessionID {
+        try await createSession(model: model, provider: provider, profile: profile, title: nil)
+    }
+
+    public func createSession(model: String?, provider: String?,
+                              profile: String?, title: String?) async throws -> SessionID {
         var params: [String: JSONValue] = [:]
         if let model { params["model"] = .string(model) }
         if let provider { params["provider"] = .string(provider) }
         // `profile` binds the new session to that bot for its whole life: the gateway stores the
         // resulting profile_home and re-binds HERMES_HOME on every turn.
         if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
+        // A title is the host-side identity another device can resolve with an exact-title
+        // `session.list`. `session.create` carries it as `pending_title`; the row is persisted by
+        // the title call below (or by the first prompt).
+        if let title, !title.isEmpty { params["title"] = .string(title) }
         let result = try await perform("session.create", params: .object(params), timeout: timeouts.sessionResume)
         guard let runtimeID = result?["session_id"]?.stringValue else {
             throw GatewayError.malformedResponse(method: "session.create")
@@ -297,6 +306,35 @@ public actor GatewayClient: GatewayClientProtocol {
         // hands it to `session.resume`, which refuses a runtime id (`4007`). Returning the runtime
         // id here made "new chat" open a session that could not be resumed.
         return storedID
+    }
+
+    public func sessionID(titled title: String, profile: String?) async throws -> SessionID? {
+        var params: [String: JSONValue] = [
+            "title": .string(title),
+            "include_hidden": .bool(true),
+        ]
+        if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
+        let result = try await perform("session.list", params: .object(params), timeout: timeouts.sessionList)
+        let rows = try GatewayPayloadDecoder.sessionSummaries(result)
+        // The host's exact-title branch returns one row. Filtering on this side too keeps a host
+        // that ignored `title` from handing us an unrelated "most recent" row.
+        return rows.first { $0.title == title }?.id
+    }
+
+    public func mostRecentSession(profile: String?) async throws -> SessionID? {
+        var params: [String: JSONValue] = [:]
+        if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
+        let result = try await perform("session.most_recent", params: .object(params), timeout: timeouts.call)
+        return try GatewayPayloadDecoder.mostRecentSession(result)
+    }
+
+    public func setSessionTitle(_ id: SessionID, title: String) async throws {
+        _ = try await perform("session.title",
+                              params: .object([
+                                "session_id": .string(addressableID(id)),
+                                "title": .string(title),
+                              ]),
+                              timeout: timeouts.call)
     }
 
     public func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry] {

@@ -5,11 +5,11 @@ import OpenBotUI
 // with the design system's own field as soon as it lands; the geometry here (32 pt tall,
 // 9 pt control radius, `Tokens.control`) is what the spec asks for.
 
-/// The session filter. Local text field with the palette's control geometry.
+/// A local filter field with the palette's control geometry.
 struct MacSidebarSearchField: View {
     @Binding var text: String
     /// The field says what it filters; the settings sheet searches a model catalogue with it.
-    var prompt: String = "Search sessions"
+    var prompt: String = "Search"
 
     @FocusState private var focused: Bool
 

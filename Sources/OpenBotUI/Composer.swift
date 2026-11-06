@@ -8,11 +8,17 @@ import SwiftUI
 /// field has something to send; the screen clears the draft on success. While a turn is
 /// running the send control becomes an interrupt, which is the contract `GatewayClient`
 /// exposes (`submit` / `interrupt`, never both at once).
+///
+/// A caller that can steer (`onSteer` non-nil) gets a second mode: when a turn is running
+/// and the field has text, the primary action is a visibly labelled **Steer** button and the
+/// interrupt stays beside it. A caller without `onSteer` (the phone today) keeps the original
+/// send/interrupt swap exactly.
 public struct Composer: View {
     @Binding private var text: String
 
     private let placeholder: String
     private let isSending: Bool
+    private let isSteering: Bool
     private let isDisabled: Bool
     private let queuedCount: Int
     private let hasAttachments: Bool
@@ -20,6 +26,7 @@ public struct Composer: View {
     private let showsMic: Bool
     private let hint: String?
     private let onSend: () -> Void
+    private let onSteer: (() -> Void)?
     private let onAttach: (() -> Void)?
     private let onMic: (() -> Void)?
     private let onInterrupt: (() -> Void)?
@@ -29,6 +36,7 @@ public struct Composer: View {
     public init(text: Binding<String>,
                 placeholder: String = "Ask Hermes anything",
                 isSending: Bool = false,
+                isSteering: Bool = false,
                 isDisabled: Bool = false,
                 queuedCount: Int = 0,
                 hasAttachments: Bool = false,
@@ -36,12 +44,14 @@ public struct Composer: View {
                 showsMic: Bool = true,
                 hint: String? = Composer.defaultHint,
                 onSend: @escaping () -> Void,
+                onSteer: (() -> Void)? = nil,
                 onAttach: (() -> Void)? = nil,
                 onMic: (() -> Void)? = nil,
                 onInterrupt: (() -> Void)? = nil) {
         _text = text
         self.placeholder = placeholder
         self.isSending = isSending
+        self.isSteering = isSteering
         self.isDisabled = isDisabled
         self.queuedCount = queuedCount
         self.hasAttachments = hasAttachments
@@ -49,6 +59,7 @@ public struct Composer: View {
         self.showsMic = showsMic
         self.hint = hint
         self.onSend = onSend
+        self.onSteer = onSteer
         self.onAttach = onAttach
         self.onMic = onMic
         self.onInterrupt = onInterrupt
@@ -76,7 +87,19 @@ public struct Composer: View {
     /// A pending attachment is sendable on its own: a file with no comment is a complete message,
     /// and disabling the arrow there made the attach feature look broken.
     private var canSend: Bool {
-        !isDisabled && !isSending && (!trimmed.isEmpty || hasAttachments)
+        !isDisabled && !isSending && !isSteering && (!trimmed.isEmpty || hasAttachments)
+    }
+
+    /// Steering is text-only on the wire (`session.steer {session_id,text}`). Attachments are
+    /// deliberately *not* part of this test: a caller that cannot carry them explains and
+    /// preserves them when the button is pressed, which is better than a disabled control
+    /// whose reason is invisible.
+    private var canSteer: Bool {
+        !isDisabled && isSending && !isSteering && !trimmed.isEmpty
+    }
+
+    private var showsSteerControl: Bool {
+        isSending && onSteer != nil && !trimmed.isEmpty
     }
 
     public var body: some View {
@@ -97,7 +120,12 @@ public struct Composer: View {
                 field
                     .frame(minHeight: controlSide - 4)
 
-                if isSending, let onInterrupt {
+                if showsSteerControl, let onSteer {
+                    steerButton(onSteer)
+                    if let onInterrupt {
+                        interruptButton(onInterrupt)
+                    }
+                } else if isSending, let onInterrupt {
                     interruptButton(onInterrupt)
                 } else {
                     sendButton
@@ -200,7 +228,46 @@ public struct Composer: View {
         .accessibilityLabel("Interrupt the turn")
     }
 
+    /// A text-labelled control, not just an arrow: the user has to be able to tell sending
+    /// a steer into the running turn from starting a new turn. The interrupt stays a
+    /// separate control next to it.
+    private func steerButton(_ action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.impact()
+            action()
+        } label: {
+            HStack(spacing: 4) {
+                if isSteering {
+                    SpinningRing(color: Tokens.textPrimary, size: glyphSize - 2, lineWidth: 1.5)
+                }
+                Text("Steer")
+                    .font(TypeScale.font(glyphSize + 1, weight: .semibold))
+                    .lineLimit(1)
+                if !isSteering {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: glyphSize - 1, weight: .bold))
+                }
+            }
+            .foregroundStyle(canSteer ? Tokens.textPrimary : Tokens.textDim)
+            .padding(.horizontal, 10)
+            .frame(height: controlSide)
+            .background(
+                Capsule().fill(canSteer ? Tokens.accent : Tokens.controlActive)
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(PressableButtonStyle())
+        .disabled(!canSteer)
+        .accessibilityLabel(isSteering ? "Steering the running turn" : "Steer")
+    }
+
     private func send() {
+        if showsSteerControl, let onSteer {
+            guard canSteer else { return }
+            Haptics.impact()
+            onSteer()
+            return
+        }
         guard canSend else { return }
         Haptics.impact()
         onSend()
@@ -213,12 +280,15 @@ private struct ComposerPreviewHost: View {
     @State private var empty = ""
     @State private var typing = "Check whether the gateway ticket is single-use, then fix the retry."
     @State private var running = "Add a test for the rewind contract"
+    @State private var steering = "Also cover the case where the turn ends mid-request"
 
     var body: some View {
         VStack(spacing: 18) {
             Composer(text: $empty, onSend: {})
             Composer(text: $typing, onSend: {})
             Composer(text: $running, isSending: true, onSend: {}, onInterrupt: {})
+            Composer(text: $steering, isSending: true, onSend: {}, onSteer: {}, onInterrupt: {})
+            Composer(text: $steering, isSending: true, isSteering: true, onSend: {}, onSteer: {}, onInterrupt: {})
             Composer(text: $empty, isDisabled: true, onSend: {})
             Composer(text: $typing, queuedCount: 2, onSend: {})
         }
