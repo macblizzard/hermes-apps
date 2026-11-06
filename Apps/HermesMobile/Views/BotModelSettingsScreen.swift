@@ -27,6 +27,7 @@ struct BotModelSettingsScreen: View {
     @State private var busy = false
     @State private var pending: ModelOption?
     @State private var confirmation = ""
+    @State private var modelQuery = ""
 
     @State private var descriptionText: String
     @State private var savedDescription: String
@@ -64,7 +65,7 @@ struct BotModelSettingsScreen: View {
                         }
                     }
                     Section {
-                        ForEach(catalog.options, id: \.self) { option in
+                        ForEach(filteredOptions(catalog), id: \.self) { option in
                             Button {
                                 Task { await select(option, confirmed: false) }
                             } label: {
@@ -98,6 +99,7 @@ struct BotModelSettingsScreen: View {
                     ProgressView("Loading models…")
                 }
             }
+            .searchable(text: $modelQuery, prompt: "Search models")
             .navigationTitle("\(bot.displayName) Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
@@ -169,6 +171,17 @@ struct BotModelSettingsScreen: View {
     }
 
     // MARK: Models
+
+    /// The catalogue is long (dozens of entries across providers), so it is searchable.
+    private func filteredOptions(_ catalog: ModelCatalog) -> [ModelOption] {
+        let query = modelQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return catalog.options }
+        return catalog.options.filter {
+            $0.label.localizedCaseInsensitiveContains(query)
+                || $0.id.localizedCaseInsensitiveContains(query)
+                || $0.provider.localizedCaseInsensitiveContains(query)
+        }
+    }
 
     private func refresh() async {
         do { catalog = try await load(bot.id); error = nil }

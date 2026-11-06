@@ -182,7 +182,7 @@ struct BotListScreen: View {
 
                 Spacer(minLength: 8)
 
-                if bot.id == lastOpenedID {
+                if model.hasUnread(bot.id) {
                     Circle()
                         .fill(Color.green)
                         .frame(width: 8, height: 8)

@@ -171,6 +171,10 @@ public final class AppModel: ObservableObject {
     /// Last message exchanged per bot, so the list can order by real activity rather than by
     /// whichever chat was merely opened. Persisted per host: it is a UI fact, not host state.
     @Published public private(set) var botActivity: [String: Date] = [:]
+    /// The bot whose conversation is on screen right now; `nil` while the list is showing.
+    @Published public private(set) var visibleBotID: String?
+    /// Bots with a reply the user has not looked at yet. Local, like the rest of the list state.
+    @Published public private(set) var unreadBots: Set<String> = []
     /// Hidden bots disappear from the list without touching the host: this is a view preference.
     @Published public private(set) var hiddenBots: Set<String> = []
 
@@ -703,6 +707,17 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Unread
+
+    /// Call when a conversation appears or disappears: whatever arrived while it was open counts as
+    /// read, and a reply that lands while the list is showing marks its bot unread.
+    public func setVisibleBot(_ botID: String?) {
+        visibleBotID = botID
+        if let botID { unreadBots.remove(botID) }
+    }
+
+    public func hasUnread(_ botID: String) -> Bool { unreadBots.contains(botID) }
+
     // MARK: Bot activity
 
     /// A message — either direction — is the only thing that reorders the bot list.
@@ -990,7 +1005,11 @@ public final class AppModel: ObservableObject {
             reasoningText += text
         case .messageComplete(let session, let text):
             guard session == selectedSessionID else { return }
-            if let bot = selectedBotID { recordActivity(for: bot) }
+            if let bot = selectedBotID {
+                recordActivity(for: bot)
+                // A reply for a bot you are not looking at is the only thing that earns a dot.
+                if visibleBotID != bot { unreadBots.insert(bot) }
+            }
             // A completion with no text would otherwise leave a blank bubble beside the streamed
             // one; the deltas already hold the reply.
             let finalText = text.isEmpty ? streamingText : text

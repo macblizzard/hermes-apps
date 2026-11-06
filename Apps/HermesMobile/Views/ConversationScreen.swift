@@ -54,6 +54,8 @@ struct ConversationScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .safeAreaInset(edge: .top, spacing: 0) { headerStrip }
+        .onAppear { model.setVisibleBot(bot.id) }
+        .onDisappear { model.setVisibleBot(nil) }
         .task(id: bot.id) {
             voice.transport = app.makeVoiceTransport()
             await openConversation()
