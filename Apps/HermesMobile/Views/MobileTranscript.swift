@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import HermesKit
 import HermesRender
 import OpenBotUI
@@ -13,6 +14,14 @@ struct MobileTranscriptRow: View {
     let entry: TranscriptEntry
 
     var body: some View {
+        // Long-press gives the whole-block actions; the text itself already supports drag-selection
+        // (`.textSelection`), which is how you copy *part* of a message.
+        content
+            .contextMenu { menu }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         switch entry.role {
         case .user:
             userBubble
@@ -25,6 +34,37 @@ struct MobileTranscriptRow: View {
         case .system:
             systemNote
         }
+    }
+
+    @ViewBuilder
+    private var menu: some View {
+        Button {
+            UIPasteboard.general.string = entry.text
+            Haptics.success()
+        } label: {
+            Label("Copy message", systemImage: "doc.on.doc")
+        }
+
+        if let code = Self.firstCodeBlock(in: entry.text) {
+            Button {
+                UIPasteboard.general.string = code
+                Haptics.success()
+            } label: {
+                Label("Copy code block", systemImage: "chevron.left.forwardslash.chevron.right")
+            }
+        }
+    }
+
+    /// The first fenced block, so a long answer with code does not force a whole-message copy.
+    static func firstCodeBlock(in text: String) -> String? {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let open = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("```") })
+        else { return nil }
+        let body = lines[(open + 1)...]
+        guard let close = body.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("```") })
+        else { return nil }
+        let code = lines[(open + 1)..<close].joined(separator: "\n")
+        return code.isEmpty ? nil : code
     }
 
     // MARK: User
