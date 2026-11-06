@@ -211,11 +211,21 @@ public final class AppModel: ObservableObject {
     /// while the user was already switching away.
     public var onDraftConsumed: (@MainActor (_ botID: String, _ acceptedText: String) -> Void)?
 
+    /// Called after a send fails, with the bot that typed it and the composition to put back.
+    /// The failure can arrive after a bot switch, so the shell must restore this into that bot's
+    /// parked draft rather than into whichever composer happens to be on screen now.
+    public var onDraftRestore: (@MainActor (_ botID: String, _ draft: String) -> Void)?
+
     private let client: GatewayClientProtocol
     private var eventTask: Task<Void, Never>?
     /// Bumped whenever the selected bot changes. An in-flight `session.list` compares it before
     /// publishing, so a slow answer for the bot we left cannot overwrite the bot we are on.
     private var botEpoch = 0
+
+    /// Bumped whenever the transcript is replaced by a host resume. A steer accepted after the
+    /// user switched away and came back may already be in that resume; this lets the success path
+    /// recognise it instead of appending a duplicate bubble.
+    private var sessionResumeGeneration = 0
 
     /// One steer per client. Keeping the request here (rather than only in the RPC call) lets a
     /// completion that lands before the RPC reply be held until the accepted steer is on screen.
@@ -225,6 +235,8 @@ public final class AppModel: ObservableObject {
         let botID: String?
         let originalDraft: String
         let text: String
+        let resumeGeneration: Int
+        let userOccurrencesAtStart: Int
     }
     private var inFlightSteer: InFlightSteer?
     private var deferredCompletions: [(session: SessionID, text: String)] = []
@@ -238,9 +250,6 @@ public final class AppModel: ObservableObject {
     /// Monotonic token for bot opens. A slow open for the bot selected first must not attach
     /// itself after a newer selection has taken over.
     private var endlessSelectionEpoch = 0
-    /// Concurrent resets for one bot share one transaction instead of double-archiving history.
-    private var resetTasks: [String: Task<Void, Never>] = [:]
-    private var resetTokens: [String: UUID] = [:]
 
     /// Storage key for the selected bot's pending attachments. An unscoped composer (before the
     /// directory loads) is its own slot rather than silently sharing the last bot's files.
@@ -362,6 +371,9 @@ public final class AppModel: ObservableObject {
         }
         // Invalidate an open already in flight for the bot we are leaving.
         endlessSelectionEpoch += 1
+        // Invalidate it at the transport too: the UI epoch only protects what this window paints,
+        // and a stale resume must not leave the gateway bound to a different bot.
+        await client.beginSessionSelection()
         resetForBotSwitch()
         selectedBotID = resolved
         await loadSessions()
@@ -409,9 +421,11 @@ public final class AppModel: ObservableObject {
         // A resume that is still in flight when the bot (or the session) changes must not land:
         // it carries the transcript of the thing the user just left.
         let epoch = botEpoch
+        await client.beginSessionSelection()
         do {
             let resumed = try await client.resumeSession(id, profile: selectedBotID)
             guard epoch == botEpoch, selectedSessionID == id else { return }
+            sessionResumeGeneration += 1
             transcript = resumed.entries
             pendingRequests = resumed.openRequests
             adopt(resumed, session: id)
@@ -487,6 +501,7 @@ public final class AppModel: ObservableObject {
             }
             transcript = entries
             pendingRequests = resumed.openRequests
+            sessionResumeGeneration += 1
             streamingText = ""
             reasoningText = ""
             liveTools = []
@@ -537,11 +552,10 @@ public final class AppModel: ObservableObject {
                 // If the user switched while the upload was running, a newer send may own the
                 // flag now. Only the conversation that started this upload may clear it.
                 if selectedSessionID == sid { sending = false }
-                if let botID { workingBotIDs.remove(botID) }
-                if selectedSessionID == sid, selectedBotID == botID {
-                    lastSendError = error.localizedDescription
-                    if draft.isEmpty { draft = originalDraft }
-                }
+                // The failure belongs to the bot that typed it, even when another bot is on
+                // screen now. Put both halves of the composition back under that bot.
+                restoreFailedSend(originalDraft: originalDraft, botID: botID,
+                                  attachments: attachments, session: sid, error: error)
                 return // keep both the words and the attachments: nothing was sent
             }
         }
@@ -576,19 +590,41 @@ public final class AppModel: ObservableObject {
             // clear its streaming flag or overwrite its draft with this failure.
             if selectedSessionID == sid, selectedBotID == botID {
                 isStreaming = false
-                if let botID { workingBotIDs.remove(botID) }
-                lastSendError = error.localizedDescription
-                // Never throw away text typed after the request left. The original draft goes back
-                // only into the same conversation's still-empty field.
-                if draft.isEmpty { draft = originalDraft }
                 // By id, not by position: switching bots or sessions while the submit was in
                 // flight empties the transcript, and a blind `removeLast()` would trap on it.
                 transcript.removeAll { $0.id == optimisticID }
             }
+            // The files were removed from the local composer after upload. A failed submit never
+            // produced a message, so put them back under the bot that owned them — on screen or
+            // not — or a retry silently sends text without its attachments.
+            restoreFailedSend(originalDraft: originalDraft, botID: botID,
+                              attachments: attachments, session: sid, error: error)
         }
         // A send that started on the previous bot must not clear the flag for a send that has
         // already started on the bot now on screen. A switch already reset it to false.
         if selectedSessionID == sid { sending = false }
+    }
+
+    /// Put a failed composition back where it belongs.
+    ///
+    /// The bot is the owner, not whatever pane is visible: a send can fail after the user has
+    /// already switched away. The visible field is only touched when it is still the same
+    /// conversation and the user has not typed something newer.
+    private func restoreFailedSend(originalDraft: String,
+                                   botID: String?,
+                                   attachments: [PendingAttachment],
+                                   session: SessionID,
+                                   error: Error) {
+        if let botID {
+            workingBotIDs.remove(botID)
+            restorePendingAttachments(attachments, for: botID)
+            if !originalDraft.isEmpty { onDraftRestore?(botID, originalDraft) }
+        }
+        guard selectedSessionID == session, selectedBotID == botID else { return }
+        lastSendError = error.localizedDescription
+        // Never throw away text typed after the request left. The original draft goes back
+        // only into the same conversation's still-empty field.
+        if draft.isEmpty { draft = originalDraft }
     }
 
     // MARK: Attachments
@@ -649,6 +685,19 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Put a failed send's files back under the bot that picked them.
+    ///
+    /// Merge by id so a file the user picked while the send was in flight is not duplicated or
+    /// discarded. This runs for a failure after a switch too, when the bot is not on screen.
+    private func restorePendingAttachments(_ attachments: [PendingAttachment], for botID: String?) {
+        guard !attachments.isEmpty else { return }
+        let scope = botID ?? ""
+        var current = pendingAttachmentsByBot[scope] ?? []
+        let existing = Set(current.map(\.id))
+        current.append(contentsOf: attachments.filter { !existing.contains($0.id) })
+        pendingAttachmentsByBot[scope] = current
+    }
+
     public func interrupt() async {
         guard let sid = selectedSessionID else { return }
         try? await client.interrupt(session: sid)
@@ -682,10 +731,15 @@ public final class AppModel: ObservableObject {
         let steerID = "steer-\(UUID().uuidString)"
         isSteering = true
         lastSendError = nil
-        inFlightSteer = InFlightSteer(id: steerID, session: sid, botID: botID,
-                                      originalDraft: originalDraft, text: text)
+        inFlightSteer = InFlightSteer(
+            id: steerID, session: sid, botID: botID,
+            originalDraft: originalDraft, text: text,
+            resumeGeneration: sessionResumeGeneration,
+            userOccurrencesAtStart: transcript.filter { $0.role == .user && $0.text == text }.count)
         do {
             try await client.steer(session: sid, text: text)
+            let steerSnapshot = inFlightSteer
+            let resumedSinceStart = steerSnapshot?.resumeGeneration != sessionResumeGeneration
             clearInFlightSteer(steerID)
             // The host accepted this text for that bot even if the user has since switched away.
             // Tell the shell so it does not offer the same words as a draft again.
@@ -696,10 +750,19 @@ public final class AppModel: ObservableObject {
                 discardDeferredCompletions(for: sid)
                 return
             }
+            // A switch back resumes the host's transcript. If that resume already contains the
+            // accepted steer, appending it here would show the same instruction twice. Compare
+            // occurrence counts, not just the last user row: a later message on another device
+            // must not hide the accepted instruction that landed before it.
+            let occurrencesNow = transcript.filter { $0.role == .user && $0.text == text }.count
+            let alreadyInResumedTranscript = resumedSinceStart
+                && occurrencesNow > (steerSnapshot?.userOccurrencesAtStart ?? 0)
             // Only clear the exact composition that was sent. Text typed while the RPC was in
             // flight is newer than this request and must survive the acknowledgement.
             if draft == originalDraft { draft = "" }
-            transcript.append(TranscriptEntry(id: steerID, role: .user, text: text))
+            if !alreadyInResumedTranscript {
+                transcript.append(TranscriptEntry(id: steerID, role: .user, text: text))
+            }
             if let botID { recordActivity(for: botID) }
             // A completion that arrived before the RPC reply was held back: put the accepted
             // steer ahead of it, then let the answer (and its tools/reasoning) land after.
@@ -750,9 +813,9 @@ public final class AppModel: ObservableObject {
 
     /// Start a fresh conversation for the selected bot.
     ///
-    /// The bot-first product has no session browser and one canonical thread per bot, so this is
-    /// the same operation as "reset": the old host row is retitled (history intact) and a new
-    /// canonical row is created. It never mints an untitled device-local session.
+    /// This client deliberately keeps one continuous conversation per bot. A new thread would
+    /// require retitling or archiving the existing one, which is unsafe without an atomic claim,
+    /// so this reports that the existing history was left unchanged instead of migrating it.
     public func newSession(model: String? = nil, provider: String? = nil) async {
         _ = (model, provider)
         guard let bot = selectedBotID else {
@@ -762,7 +825,7 @@ public final class AppModel: ObservableObject {
         await resetEndlessSession(for: bot)
     }
 
-    /// True while a created session has no row on the host yet (see `newSession`).
+    /// True while a created session has no row on the host yet (see `endlessSession`).
     public func isDraft(_ id: SessionID) -> Bool { draftSessionIDs.contains(id) }
 
     /// Retry a dropped connection without losing the open session.
@@ -802,17 +865,15 @@ public final class AppModel: ObservableObject {
     /// If the new row cannot be given the canonical title it is not claimed or cached; the
     /// failure is reported and no existing history is replaced.
     public func endlessSession(for botID: String) async -> SessionID? {
-        // A reset owns this bot's conversation until its replacement is attached. Opening midway
-        // could reattach the row the reset is archiving.
-        if let resetting = resetTasks[botID] {
-            await resetting.value
-        }
         // Coalesce only a task that still belongs to the newest selection. If the user switched
         // away and back, an old task for this bot is stale and must be replaced rather than
         // awaited.
         if let inFlight = endlessOpenTasks[botID], endlessOpenEpochs[botID] == endlessSelectionEpoch {
             return await inFlight.value
         }
+        // Tell the transport that a newer selection has begun before its resume leaves. The UI
+        // epoch below cannot stop a stale reply from re-binding the socket inside GatewayClient.
+        await client.beginSessionSelection()
         endlessSelectionEpoch += 1
         let epoch = endlessSelectionEpoch
         let token = UUID()
@@ -862,10 +923,10 @@ public final class AppModel: ObservableObject {
                 do {
                     let recovered = try await resumeConversation(stored, botID: botID, epoch: epoch)
                     Self.defaults.set(recovered, forKey: key)
-                    // Best effort: make the recovered history discoverable by exact title. If
-                    // the host cannot write it, the thread is still open and its key is intact;
-                    // the error says it is not a sync guarantee.
-                    _ = await claimCanonicalTitle(recovered, botID: botID)
+                    // Do not retitle recovered history. It may carry a title the user chose, and
+                    // an automatic migration here mutates an existing chat before anyone asked.
+                    // The local pointer keeps this thread reachable; cross-device discovery is a
+                    // separate, unresolved race (docs/ENDLESS-CHAT.md §2).
                     return recovered
                 } catch is CancellationError {
                     throw CancellationError()
@@ -916,143 +977,26 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    /// Reset this bot's conversation without deleting its history.
+    /// Reset is intentionally unavailable.
     ///
-    /// The replacement is created and given the canonical title **before** the old row is
-    /// renamed. A failure therefore leaves the old conversation exactly where it was, and a
-    /// navigation away from the bot cancels the whole operation (restoring the old title if it
-    /// had already been archived). History is never stranded under an archived title with no
-    /// replacement.
+    /// Making a replacement canonical requires either retitling an existing chat or archiving it.
+    /// Neither is safe to do automatically: the host has no atomic title claim, and a rename can
+    /// make history the user still needs look like an abandoned row on another device. The safe
+    /// behaviour is to keep the current thread exactly as it is and say so, rather than migrate or
+    /// reset it behind the user's back.
     public func resetEndlessSession(for botID: String) async {
-        // Two presses (or a phone and this window) must not create two replacements and archive
-        // the same old row twice. The second reset waits for the first and is then a no-op.
-        if let inFlight = resetTasks[botID] {
-            await inFlight.value
-            return
-        }
-        let token = UUID()
-        resetTokens[botID] = token
-        let task = Task<Void, Never> { [weak self] in
-            guard let self else { return }
-            await self.performResetEndlessSession(for: botID)
-        }
-        resetTasks[botID] = task
-        await task.value
-        if resetTokens[botID] == token {
-            resetTasks[botID] = nil
-            resetTokens[botID] = nil
-        }
-    }
-
-    private func performResetEndlessSession(for botID: String) async {
-        // Reset is an explicit action on the open conversation. Refuse it for a bot this window
-        // is not showing rather than retitling a bank of history for another conversation.
         guard selectedBotID == botID else {
-            lastSendError = "could not reset the conversation: \(botID) is not the open bot"
+            lastSendError = "could not reset the conversation: \(botID) is not the open bot. Its history was not touched."
             return
         }
-        // An open already in flight for this bot must not attach the row we are replacing.
-        endlessSelectionEpoch += 1
-        let key = Self.endlessKey(botID)
-        let stored = Self.defaults.string(forKey: key)
-        var previous = selectedSessionID ?? stored
-        if previous == nil {
-            // A reset can arrive before this bot was opened in this window. Find the row the user
-            // means by its exact title; do not guess from "most recent".
-            do {
-                previous = try await client.sessionID(titled: Self.canonicalConversationTitle,
-                                                      profile: botID)
-            } catch {
-                lastSendError = "could not reset the conversation: \(error.localizedDescription)"
-                return
-            }
-        }
-
-        // Create the replacement first. Nothing below touches the old row until the new one is
-        // titled, so a create/title failure cannot rename or strand existing history.
-        let created: SessionID
-        do {
-            created = try await client.createSession(model: nil, provider: nil,
-                                                     profile: botID,
-                                                     title: Self.canonicalConversationTitle)
-        } catch {
-            lastSendError = "could not start a new conversation: \(error.localizedDescription). The old conversation was left unchanged."
-            return
-        }
-
-        guard selectedBotID == botID else {
-            await abandonUnattachedSession(created)
-            return
-        }
-
-        do {
-            try await client.setSessionTitle(created, title: Self.canonicalConversationTitle)
-        } catch {
-            await abandonUnattachedSession(created)
-            lastSendError = "could not start a new conversation safely: \(error.localizedDescription). The old conversation was left unchanged."
-            return
-        }
-
-        // A navigation that happened while the new row was being titled cancels the reset.
-        guard selectedBotID == botID else {
-            await abandonUnattachedSession(created)
-            return
-        }
-
-        if let previous {
-            do {
-                try await retitleForReset(previous, botID: botID)
-            } catch {
-                // The old row is still canonical and accessible. Demote the replacement so the
-                // reset fails as a unit instead of leaving two canonical rows behind.
-                await abandonUnattachedSession(created)
-                lastSendError = "could not reset the conversation: \(error.localizedDescription). The old conversation is still available."
-                return
-            }
-        }
-
-        // Navigation during the archive step also cancels: put the old title back and keep the
-        // replacement out of the canonical slot. Neither history is lost.
-        guard selectedBotID == botID else {
-            if let previous {
-                try? await client.setSessionTitle(previous, title: Self.canonicalConversationTitle)
-            }
-            await abandonUnattachedSession(created)
-            return
-        }
-
-        // Archiving the old row can resume it (the title RPC acts on an attached session), which
-        // moves the gateway client's runtime attachment to the old id. Re-attach the replacement
-        // so the next prompt addresses the new conversation, not the archived one.
-        do {
-            _ = try await client.resumeSession(created, profile: botID)
-        } catch {
-            if let previous {
-                try? await client.setSessionTitle(previous, title: Self.canonicalConversationTitle)
-            }
-            await abandonUnattachedSession(created)
-            lastSendError = "could not open the new conversation: \(error.localizedDescription). The old conversation is still available."
-            return
-        }
-        guard selectedBotID == botID else {
-            if let previous {
-                try? await client.setSessionTitle(previous, title: Self.canonicalConversationTitle)
-            }
-            await abandonUnattachedSession(created)
-            return
-        }
-
-        Self.defaults.set(created, forKey: key)
-        if let previous { draftSessionIDs.remove(previous) }
-        draftSessionIDs.insert(created)
-        clearConversation()
-        selectedSessionID = created
+        lastSendError = "This client keeps \(botID)'s existing conversation. Starting a new one would require retitling or archiving its history, so nothing was changed."
     }
 
     private func resumeConversation(_ id: SessionID, botID: String, epoch: Int) async throws -> SessionID {
         let resumed = try await client.resumeSession(id, profile: botID)
         guard epoch == endlessSelectionEpoch, selectedBotID == botID else { throw CancellationError() }
         selectedSessionID = id
+        sessionResumeGeneration += 1
         transcript = resumed.entries
         pendingRequests = resumed.openRequests
         draftSessionIDs.remove(id)
@@ -1062,39 +1006,14 @@ public final class AppModel: ObservableObject {
 
     /// Best effort to take a row that was created for a cancelled/failed operation out of the
     /// canonical slot. Its history (none, by construction) is not deleted and the ID is not
-    /// cached, so a later open resolves normally.
+    /// cached, so a later open resolves normally. This only ever touches a row this client just
+    /// created; recovered history is never retitled.
     private func abandonUnattachedSession(_ id: SessionID) async {
         try? await client.setSessionTitle(id, title: archivedTitle(id, label: "unshared"))
     }
 
-    /// Claim the canonical title for recovered history. Returns whether the host accepted it.
-    /// A failure is reported as "not shared", never as successful sync.
-    @discardableResult
-    private func claimCanonicalTitle(_ id: SessionID, botID: String) async -> Bool {
-        do {
-            try await client.setSessionTitle(id, title: Self.canonicalConversationTitle)
-            return true
-        } catch {
-            lastSendError = "opened \(botID)'s conversation, but the host did not confirm the shared title: \(error.localizedDescription). The history is still open and accessible, but it is not promised to sync with other devices."
-            return false
-        }
-    }
-
     private func archivedTitle(_ id: SessionID, label: String) -> String {
         "\(Self.canonicalConversationTitle) · \(label) \(String(id.prefix(8)))"
-    }
-
-    /// Retitle a live session, resuming it first when it is not the one currently attached.
-    private func retitleForReset(_ id: SessionID, botID: String) async throws {
-        let archived = archivedTitle(id, label: "previous")
-        do {
-            try await client.setSessionTitle(id, title: archived)
-        } catch {
-            // `session.title` acts on an attached session. Resuming first is side-effect-free for
-            // history and gives the title call the runtime id it needs.
-            _ = try await client.resumeSession(id, profile: botID)
-            try await client.setSessionTitle(id, title: archived)
-        }
     }
 
     /// Hermes uses 4007 for a stored id that is not attached/resolvable; 4001 is the equivalent

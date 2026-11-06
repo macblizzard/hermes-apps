@@ -23,11 +23,11 @@ Resolution order, each step verified against the host:
    title.
 2. **This device's saved id.** Only when no canonical row exists: resume
    `hermes.endlessSession.<botID>` if the host still has it. This keeps pre-canonical and
-   device-local history reachable instead of silently replacing it with a fresh `Bot Chat`. The
-   resumed row is offered the canonical title as a best-effort publication step. If that write
-   fails, the history stays open, the id stays cached, and the error says plainly that sync is not
-   promised. A timeout/transport failure keeps the pointer; only a host "session not found"
-   (4001/4007) is treated as stale.
+   device-local history reachable instead of silently replacing it with a fresh `Bot Chat`.
+   The recovered row is **not retitled**: it may carry a title the user chose, so opening it must
+   not run an automatic canonical migration. The saved id remains the local pointer. A
+   timeout/transport failure keeps the pointer; only a host "session not found" (4001/4007) is
+   treated as stale.
 3. **A fresh canonical row.** If there is neither an exact-title row nor a resumable local id,
    create one (`session.create {profile, title: "Bot Chat"}`). The row is cached/attached only
    after the host accepts the title write. If that write fails, the row is not claimed, no
@@ -36,12 +36,11 @@ Resolution order, each step verified against the host:
 The client does **not** adopt the host's `session.most_recent {profile}` row: that can be an
 unrelated TUI or messaging thread, and titling it would overwrite a title the user chose.
 
-"Reset conversation" lives in the conversation's overflow menu, behind a confirmation. It is the
-one **user-initiated** retitle. The replacement is created and titled **before** the old row is
-renamed to `Bot Chat · previous <id>`; the old history stays intact. If the create, title, or
-archive step fails, the operation fails as a unit (the replacement is demoted and the old row
-remains canonical). Navigating to another bot while a reset is in flight cancels it and restores
-the old title, so history is never left archived with no replacement.
+There is **no automatic reset or canonical migration**. Starting a new conversation would require
+either retitling an existing chat or archiving it, and neither is safe without an atomic claim.
+The client therefore leaves the existing thread, its title and its local pointer untouched and
+reports that nothing was changed. The conversation stays reachable; old history is never archived
+by this client.
 
 ### Explicit limitations (not sync guarantees)
 
@@ -49,6 +48,8 @@ the old title, so history is never left archived with no replacement.
   operation and does not enforce uniqueness of `Bot Chat`. Two devices that open a bot before
   either has titled a row can each create their own canonical row. The client does not delete or
   merge duplicates and does **not** claim race-safe convergence.
+- **The cross-device race remains unresolved.** This batch does not fix two devices creating or
+  choosing different rows at the same time. It is a known blocker, not a solved guarantee.
 - **Same-client concurrency is coalesced.** Two opens for one bot in this client wait on the same
   resolution task, so they cannot both create a row. That is a local convenience, not a
   cross-device guarantee.

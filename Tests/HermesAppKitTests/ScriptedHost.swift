@@ -19,6 +19,12 @@ final class ScriptedHost: GatewayClientProtocol, @unchecked Sendable {
     var steerError: Error?
     /// Park `steer` here to inspect the model's in-flight state deterministically.
     var onSteer: (@Sendable () async -> Void)?
+    /// Attachment and submit failure injection for composer-retention regressions.
+    private(set) var attached: [(name: String, isImage: Bool)] = []
+    var attachError: Error?
+    var submitError: Error?
+    var onAttach: (@Sendable () async -> Void)?
+    var onSubmit: (@Sendable () async -> Void)?
 
     /// Failure injection for canonical conversation lifecycle tests.
     var createError: Error?
@@ -152,7 +158,18 @@ final class ScriptedHost: GatewayClientProtocol, @unchecked Sendable {
 
     // MARK: Turns
 
-    func submit(session: SessionID, text: String) async throws { submitted.append(text) }
+    func attach(session: SessionID, name: String, data: Data, isImage: Bool) async throws -> AttachmentReceipt {
+        if let onAttach { await onAttach() }
+        if let attachError { throw attachError }
+        attached.append((name, isImage))
+        return AttachmentReceipt(refText: isImage ? nil : "@file:\(name)")
+    }
+
+    func submit(session: SessionID, text: String) async throws {
+        if let onSubmit { await onSubmit() }
+        if let submitError { throw submitError }
+        submitted.append(text)
+    }
     func steer(session: SessionID, text: String) async throws {
         steered.append(text)
         if let onSteer { await onSteer() }

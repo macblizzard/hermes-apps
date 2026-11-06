@@ -12,10 +12,8 @@ struct BotModelSettingsScreen: View {
     let bot: Bot
     let load: (String) async throws -> ModelCatalog
     /// True when this bot's conversation is the one currently open. A live conversation keeps the
-    /// model it was created with — the gateway pins it per session and offers no way to change it —
-    /// so the only way to apply a new default to it is to start it over.
+    /// model it was created with — the gateway pins it per session and offers no way to change it.
     var conversationIsOpen: Bool = false
-    var resetConversation: (() async -> Void)? = nil
     let save: (String, ModelOption, Bool) async throws -> SaveResult
     /// Writes the human-readable description on the host (`profiles.configure`, description
     /// section). `nil` hides the editor entirely — a client that cannot write it must not offer it.
@@ -38,13 +36,11 @@ struct BotModelSettingsScreen: View {
     init(bot: Bot,
          load: @escaping (String) async throws -> ModelCatalog,
          conversationIsOpen: Bool = false,
-         resetConversation: (() async -> Void)? = nil,
          save: @escaping (String, ModelOption, Bool) async throws -> SaveResult,
          saveDescription: ((String, String) async throws -> Void)? = nil) {
         self.bot = bot
         self.load = load
         self.conversationIsOpen = conversationIsOpen
-        self.resetConversation = resetConversation
         self.save = save
         self.saveDescription = saveDescription
         _descriptionText = State(initialValue: bot.description ?? "")
@@ -85,15 +81,8 @@ struct BotModelSettingsScreen: View {
                         Text("Models")
                     } footer: {
                         Text(conversationIsOpen
-                             ? "This becomes the bot's default. The conversation you have open keeps the model it started with — reset it to use the new one."
+                             ? "This becomes the bot's default. The conversation you have open keeps the model it started with; its history is left unchanged."
                              : "This becomes the bot's default for new conversations with this bot.")
-                    }
-                    if conversationIsOpen, let resetConversation {
-                        Section {
-                            Button("Reset this conversation to use it") {
-                                Task { await resetConversation(); dismiss() }
-                            }
-                        }
                     }
                 } else if error == nil {
                     ProgressView("Loading models…")

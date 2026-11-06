@@ -174,6 +174,10 @@ public actor GatewayClient: GatewayClientProtocol {
     private var boundProfile: String?
     private var attachedRuntimeID: SessionID?
     private var attachedStoredID: SessionID?
+    /// Monotonic ordering for user-driven selections. Every resume/create takes a ticket before
+    /// its RPC leaves; only the newest ticket may attach to the transport. This is deliberately
+    /// below the UI: a stale reply cannot re-bind the socket even if the view has moved on.
+    private var sessionSelectionGeneration = 0
     private var lastSnapshot: SessionResume?
     private var rewindSurvivors: [SessionID: [Int64?]] = [:]
 
@@ -230,6 +234,12 @@ public actor GatewayClient: GatewayClientProtocol {
         setState(.closed(reason: "client closed"))
     }
 
+    /// A newer bot/session selection begins. Any resume already on the wire for the old one is
+    /// stale from this point on and may not call `attach`.
+    public func beginSessionSelection() async {
+        sessionSelectionGeneration += 1
+    }
+
     // MARK: Sessions
 
     public func ping() async throws {
@@ -268,8 +278,20 @@ public actor GatewayClient: GatewayClientProtocol {
     }
 
     public func resumeSession(_ id: SessionID, profile: String?) async throws -> SessionResume {
-        if let profile, !profile.isEmpty { boundProfile = profile }
-        let resumed = try await performResume(id, profile: profile ?? boundProfile)
+        // Every resume is a selection candidate. Taking the ticket before the RPC means two
+        // overlapping resumes (or an explicit beginSessionSelection from the next bot) leave only
+        // the newest one allowed to attach when its reply lands.
+        sessionSelectionGeneration += 1
+        let selection = sessionSelectionGeneration
+        let resolvedProfile = (profile?.isEmpty == false) ? profile : boundProfile
+        let resumed = try await performResume(id, profile: resolvedProfile)
+        // A newer selection took over while this reply was in flight. Return its data to the
+        // caller (which still owns its own UI epoch) but never let it become the transport's
+        // current attachment.
+        guard selection == sessionSelectionGeneration else { return resumed.resume }
+        if let profile, !profile.isEmpty {
+            boundProfile = profile
+        }
         attach(resumed, announced: false)
         return resumed.resume
     }
@@ -294,11 +316,18 @@ public actor GatewayClient: GatewayClientProtocol {
         // `session.list`. `session.create` carries it as `pending_title`; the row is persisted by
         // the title call below (or by the first prompt).
         if let title, !title.isEmpty { params["title"] = .string(title) }
+        // `session.create` is part of the same selection ordering as a resume: a slow create for
+        // the bot the user left must not attach itself after a newer selection.
+        sessionSelectionGeneration += 1
+        let selection = sessionSelectionGeneration
         let result = try await perform("session.create", params: .object(params), timeout: timeouts.sessionResume)
         guard let runtimeID = result?["session_id"]?.stringValue else {
             throw GatewayError.malformedResponse(method: "session.create")
         }
         let storedID = result?["stored_session_id"]?.stringValue ?? runtimeID
+        // Return the id even when stale so the caller can clean up the unattached row, but do not
+        // let it become the transport's current attachment.
+        guard selection == sessionSelectionGeneration else { return storedID }
         if let profile, !profile.isEmpty { boundProfile = profile }
         attachedRuntimeID = runtimeID
         attachedStoredID = storedID
@@ -985,7 +1014,11 @@ public actor GatewayClient: GatewayClientProtocol {
         let previousRuntimeID = attachedRuntimeID
         let watermark = previousRuntimeID.flatMap { watermarks[$0] }
 
+        let selection = sessionSelectionGeneration
         let resumed = try await performResume(storedID, profile: boundProfile)
+        // The user picked another bot while this reconnect was on the wire. Its resume belongs to
+        // the old selection and must not attach over the newer one.
+        guard selection == sessionSelectionGeneration else { return }
         // A different runtime id is a different backend process: every question the old one was
         // blocked on died with it, so nothing it asked is still answerable.
         if let previous = previousRuntimeID, previous != resumed.runtimeID {

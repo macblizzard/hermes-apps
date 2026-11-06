@@ -10,8 +10,8 @@ import OpenBotUI
 /// There is no session browser here and none anywhere else: opening a bot asks the model
 /// for that bot's stored (or freshly created) session and attaches to it. The header is
 /// the bot, the model the host named, the wire latency and how full the context window is;
-/// the only two things you can do to the thread — compact it or reset it — sit behind the
-/// overflow menu, and resetting asks first.
+/// compaction sits behind the overflow menu. The thread is never reset or retitled
+/// automatically, so its history stays reachable.
 struct ConversationScreen: View {
     @ObservedObject var model: AppModel
     @EnvironmentObject private var app: AppEnvironment
@@ -21,7 +21,6 @@ struct ConversationScreen: View {
     @State private var sessionID: SessionID?
     @State private var isOpening = true
     @State private var showApprovalSheet = false
-    @State private var showResetConfirm = false
     @State private var notice: String?
     @State private var lastSeenRequestCount = 0
     @State private var hasLoaded = false
@@ -128,7 +127,6 @@ struct ConversationScreen: View {
                 bot: bot,
                 load: { botID in try await model.modelCatalog(for: botID) },
                 conversationIsOpen: true,
-                resetConversation: { await model.resetEndlessSession(for: bot.id) },
                 save: { botID, option, confirmed in
                     switch try await model.configureModel(botID: botID, model: option.id,
                                                           provider: option.provider,
@@ -159,16 +157,6 @@ struct ConversationScreen: View {
         }
         .sheet(isPresented: $showApprovalSheet) {
             MobileApprovalSheet(model: model, request: model.pendingRequests.first)
-        }
-        .confirmationDialog("Reset this conversation?",
-                            isPresented: $showResetConfirm,
-                            titleVisibility: .visible) {
-            Button("Reset conversation", role: .destructive) {
-                Task { await resetConversation() }
-            }
-            Button("Keep it", role: .cancel) {}
-        } message: {
-            Text("This starts a new conversation with \(title) and gives it the shared title on the host. The old thread keeps its history; devices resolve the new title on their next open.")
         }
         .alert("Couldn’t add attachment", isPresented: noticeBinding) {
             Button("OK", role: .cancel) { notice = nil }
@@ -506,14 +494,6 @@ struct ConversationScreen: View {
                         Label("Compact now", systemImage: "arrow.down.right.and.arrow.up.left")
                     }
                     .disabled(sessionID == nil)
-
-                    Divider()
-
-                    Button(role: .destructive) {
-                        showResetConfirm = true
-                    } label: {
-                        Label("Reset conversation", systemImage: "arrow.counterclockwise")
-                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .foregroundStyle(Tokens.textSecondary)
@@ -691,22 +671,6 @@ struct ConversationScreen: View {
         // transcript, not in a sheet the user never asked for; only *arrivals* pop one.
         lastSeenRequestCount = model.pendingRequests.count
         hasLoaded = true
-        isOpening = false
-    }
-
-    /// Start a new conversation for this bot. The old thread keeps its history on the host and is
-    /// retitled there so the other device no longer resolves it as the shared conversation.
-    private func resetConversation() async {
-        Haptics.impact()
-        isOpening = true
-
-        await model.resetEndlessSession(for: bot.id)
-        sessionID = model.selectedSessionID
-        if sessionID == nil {
-            sessionID = await model.endlessSession(for: bot.id)
-        }
-
-        lastSeenRequestCount = model.pendingRequests.count
         isOpening = false
     }
 

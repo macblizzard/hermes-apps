@@ -46,6 +46,13 @@ final class WorkspaceStore: ObservableObject {
     /// Unsent text per bot plus a generation token. A slow open for an older selection cannot
     /// restore its draft over the bot the user is on now.
     private var drafts = BotDraftLedger()
+    /// The bot whose composer is actually attached. `nil` while a switch is still opening or when
+    /// no bot has loaded yet. This is what distinguishes "the user cleared an attached draft" (a
+    /// real empty composition) from "the next selection has not arrived yet" (not evidence).
+    private var draftOwnerBotID: String?
+    /// The target of the newest switch, even before its conversation opens. Text typed into the
+    /// empty composer while that open is in flight belongs to this bot, not to the previous one.
+    private var openingBotID: String?
     /// The bot whose canonical conversation this window last opened, so a reconnect does not
     /// resume the same thread a second time and interrupt what is already on screen.
     private var openedBotID: String?
@@ -80,6 +87,12 @@ final class WorkspaceStore: ObservableObject {
     private func bindDraftCallbacks() {
         model.onDraftConsumed = { [weak self] botID, text in
             self?.drafts.consumeAccepted(botID: botID, text: text)
+        }
+        // A send can fail after the user has switched away. Restore into the bot that owned the
+        // composition, not into whichever composer is visible now. The ledger refuses to replace
+        // anything typed for that bot after the failure was created.
+        model.onDraftRestore = { [weak self] botID, text in
+            self?.drafts.restoreFailedDraft(botID: botID, text: text)
         }
     }
 
@@ -162,15 +175,28 @@ final class WorkspaceStore: ObservableObject {
     /// unrelated session.
     func selectBot(_ id: String) {
         guard id != model.selectedBotID else { return }
-        let token = drafts.beginSwitch(from: model.selectedBotID, draft: model.draft)
+        // The composer belongs to the attached bot, or to the target of an open that has not
+        // finished yet. `model.selectedBotID` alone is not enough: a rapid second selection can
+        // arrive before the first one's open has updated it.
+        let source = openingBotID ?? draftOwnerBotID ?? model.selectedBotID
+        let sourceIsAttached = openingBotID == nil && draftOwnerBotID == source
+        let token = drafts.beginSwitch(from: source, draft: model.draft,
+                                       replacingParkedDraft: sourceIsAttached)
         model.draft = ""
+        draftOwnerBotID = nil
+        openingBotID = id
         Task { [weak self] in
             guard let self else { return }
-            _ = await self.model.endlessSession(for: id)
+            let opened = await self.model.endlessSession(for: id)
             // A newer switch owns the screen now: neither its bot nor its draft may be replaced
             // by this slower answer.
             guard self.drafts.isCurrent(token), self.model.selectedBotID == id else { return }
+            if self.openingBotID == id { self.openingBotID = nil }
+            // A failed open keeps the parked draft for the next visit; it must not be called the
+            // opened bot if there is no conversation to attach.
+            guard opened != nil else { return }
             self.openedBotID = id
+            self.draftOwnerBotID = id
             // The chip names the bot on screen: re-read that bot's own default.
             await self.refreshOpenBotModelLabel()
             guard self.drafts.isCurrent(token), self.model.selectedBotID == id else { return }
@@ -228,6 +254,8 @@ final class WorkspaceStore: ObservableObject {
         model = WorkspaceStore.makeModel(for: address)
         bindDraftCallbacks()
         drafts.removeAll()
+        draftOwnerBotID = nil
+        openingBotID = nil
         openedBotID = nil
         connectAttempted = false
         isPairSheetPresented = false
@@ -246,6 +274,8 @@ final class WorkspaceStore: ObservableObject {
         model = AppModel(client: UnpairedGatewayClient(), hostName: "hermes")
         bindDraftCallbacks()
         drafts.removeAll()
+        draftOwnerBotID = nil
+        openingBotID = nil
         openedBotID = nil
         connectAttempted = false
     }
@@ -292,11 +322,13 @@ final class WorkspaceStore: ObservableObject {
         guard model.connection.isLive, let bot = model.selectedBotID else { return }
         guard force || openedBotID != bot || model.selectedSessionID == nil else { return }
         let token = drafts.currentToken
-        _ = await model.endlessSession(for: bot)
+        let opened = await model.endlessSession(for: bot)
         // The selection changed while the conversation was opening. Do not claim this bot as
         // opened and do not write its draft over the current one.
         guard drafts.isCurrent(token), model.selectedBotID == bot else { return }
+        guard opened != nil else { return }
         openedBotID = bot
+        draftOwnerBotID = bot
         // Only restore parked text into an untouched composer; newer typing wins.
         guard model.draft.isEmpty,
               let restored = drafts.draft(for: bot, token: token),

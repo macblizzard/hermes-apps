@@ -21,6 +21,7 @@ actor FakeGateway {
     private var scopedResults: [String: [String: JSONValue]] = [:]
     private var errors: [String: RPCError] = [:]
     private var silent: Set<String> = []
+    private var onRequest: (@Sendable (String, JSONValue?) async -> Void)?
 
     init() {
         var captured: AsyncStream<GatewayTransport.Event>.Continuation!
@@ -67,6 +68,12 @@ actor FakeGateway {
 
     func setError(_ error: RPCError, for method: String) { errors[method] = error }
 
+    /// Park a request before its scripted answer is emitted. Tests use a continuation here to
+    /// create controlled interleavings instead of sleeping.
+    func setOnRequest(_ handler: (@Sendable (String, JSONValue?) async -> Void)?) {
+        onRequest = handler
+    }
+
     /// Never answer this method — how a timeout is provoked deterministically.
     func silence(_ method: String) { silent.insert(method) }
 
@@ -93,6 +100,7 @@ actor FakeGateway {
         guard let frame = try? JSONDecoder().decode(JSONValue.self, from: Data(text.utf8)) else { return }
         sent.append(frame)
         guard let method = frame["method"]?.stringValue, let id = frame["id"] else { return }
+        if let onRequest { await onRequest(method, frame["params"]) }
         if silent.contains(method) { return }
         if let error = errors[method] {
             respond(to: id, error: error)

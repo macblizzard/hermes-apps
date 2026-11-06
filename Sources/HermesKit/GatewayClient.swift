@@ -18,6 +18,14 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
 
     func disconnect() async
 
+    /// Invalidate any session resume already in flight for a previous bot selection.
+    ///
+    /// A resume carries the bot whose stored id it was given. UI epochs stop a stale answer from
+    /// being painted, but they cannot stop the transport itself from re-attaching to that older
+    /// bot when the reply lands. Selection-aware clients make this a hard ordering rule.
+    /// Stateless/preview clients may leave the default no-op implementation.
+    func beginSessionSelection() async
+
     // Bots
     /// The bots (Hermes **profiles**) this one gateway serves.
     ///
@@ -222,6 +230,9 @@ public struct Bot: Identifiable, Hashable, Sendable {
 }
 
 public extension GatewayClientProtocol {
+    /// Clients with no selection state have no stale resume to invalidate.
+    func beginSessionSelection() async {}
+
     /// Conformers with no notion of a bot (previews, the unpaired stub, tests) keep the global call.
     func modelCatalog(profile: String?) async throws -> ModelCatalog {
         try await modelCatalog()

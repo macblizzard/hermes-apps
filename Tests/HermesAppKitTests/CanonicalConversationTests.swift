@@ -60,8 +60,8 @@ final class CanonicalConversationTests: XCTestCase {
         XCTAssertEqual(host.resumedIDs, ["legacy-local-id"])
         XCTAssertTrue(host.createdSessions.isEmpty,
                       "existing device-local history must not be replaced by a fresh Bot Chat")
-        XCTAssertEqual(host.titleWrites.map { $0.0 }, ["legacy-local-id"],
-                       "the recovered row is offered the canonical title")
+        XCTAssertTrue(host.titleWrites.isEmpty,
+                      "recovered history keeps its own title; it is never silently migrated")
         XCTAssertEqual(UserDefaults.standard.string(forKey: key(bot)), "legacy-local-id")
         await model.stop()
     }
@@ -140,10 +140,10 @@ final class CanonicalConversationTests: XCTestCase {
         await model.stop()
     }
 
-    /// Recovering an existing thread is still the right move when publishing its title fails:
-    /// the history stays open, and the error explicitly refuses to promise sync.
-    func testRecoveredLocalHistoryStaysOpenWhenTitlePublicationFails() async {
-        let bot = freshBot("recover-title-fail")
+    /// Recovering an existing thread does not depend on a title write at all. Even when the host's
+    /// title store is broken, the local history opens and remains accessible, unmodified.
+    func testRecoveredLocalHistoryOpensWithoutAnyTitleWrite() async {
+        let bot = freshBot("recover-no-title-write")
         defer { UserDefaults.standard.removeObject(forKey: key(bot)) }
         let (model, host) = makeModel(bot: bot)
         UserDefaults.standard.set("legacy-local-id", forKey: key(bot))
@@ -154,113 +154,53 @@ final class CanonicalConversationTests: XCTestCase {
         XCTAssertEqual(opened, "legacy-local-id")
         XCTAssertEqual(model.selectedSessionID, "legacy-local-id")
         XCTAssertEqual(UserDefaults.standard.string(forKey: key(bot)), "legacy-local-id")
-        XCTAssertTrue(model.lastSendError?.contains("not promised to sync") == true)
+        XCTAssertTrue(host.titleWrites.isEmpty,
+                      "opening history must not attempt a canonical migration")
+        XCTAssertNil(model.lastSendError)
         await model.stop()
     }
 
-    func testResetCreatesTheReplacementBeforeArchivingTheOldRow() async {
-        let bot = freshBot("reset")
+    /// Reset is deliberately removed: making a new row canonical would require retitling or
+    /// archiving the existing chat. The old thread, its title and the local pointer stay untouched.
+    func testResetDoesNotCreateRetitleOrArchiveExistingHistory() async {
+        let bot = freshBot("reset-noop")
         defer { UserDefaults.standard.removeObject(forKey: key(bot)) }
         let (model, host) = makeModel(bot: bot)
         host.canonicalSessions[bot] = "old-id"
 
         let opened = await model.endlessSession(for: bot)
         XCTAssertEqual(opened, "old-id")
-
-        await model.resetEndlessSession(for: bot)
-
-        XCTAssertEqual(model.selectedSessionID, "created-\(bot)-1")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: key(bot)), "created-\(bot)-1")
-        XCTAssertEqual(host.titleWrites.map { $0.0 }, ["created-\(bot)-1", "old-id"],
-                       "the replacement is published before the old row is archived")
-        XCTAssertEqual(host.titleWrites.first?.1, AppModel.canonicalConversationTitle)
-        XCTAssertNotEqual(host.titleWrites.last?.1, AppModel.canonicalConversationTitle,
-                          "the old conversation keeps its history but leaves the canonical slot")
-        XCTAssertEqual(host.createdSessions.last?.profile, bot)
-        XCTAssertEqual(host.createdSessions.last?.title, AppModel.canonicalConversationTitle)
-        XCTAssertEqual(host.resumedIDs.last, "created-\(bot)-1",
-                       "the replacement is re-attached after archiving may have resumed the old row")
-        await model.stop()
-    }
-
-    /// A failure to create the replacement happens before any rename. The old conversation must
-    /// still be selected, cached and on screen.
-    func testResetCreateFailureDoesNotRenameOrReplaceTheOldConversation() async {
-        let bot = freshBot("reset-create-fail")
-        defer { UserDefaults.standard.removeObject(forKey: key(bot)) }
-        let (model, host) = makeModel(bot: bot)
-        host.canonicalSessions[bot] = "old-id"
-        _ = await model.endlessSession(for: bot)
-        let before = model.transcript
-        host.createError = GatewayError.rpc(RPCError(code: 5002, message: "create unavailable"))
+        let beforeTranscript = model.transcript
 
         await model.resetEndlessSession(for: bot)
 
         XCTAssertEqual(model.selectedSessionID, "old-id")
-        XCTAssertEqual(model.transcript, before)
+        XCTAssertEqual(model.transcript, beforeTranscript)
         XCTAssertEqual(UserDefaults.standard.string(forKey: key(bot)), "old-id")
+        XCTAssertTrue(host.createdSessions.isEmpty,
+                      "no replacement is created behind the user's back")
         XCTAssertTrue(host.titleWrites.isEmpty,
-                      "the old row is not renamed when its replacement cannot be created")
-        XCTAssertTrue(model.lastSendError?.contains("left unchanged") == true)
+                      "the existing chat is never silently retitled or archived")
+        XCTAssertEqual(host.canonicalSessions[bot], "old-id")
+        XCTAssertTrue(model.lastSendError?.contains("nothing was changed") == true)
         await model.stop()
     }
 
-    /// If archiving the old row fails, the replacement is demoted so the reset fails as a unit
-    /// and the old canonical conversation remains reachable.
-    func testResetArchiveFailureLeavesTheOldCanonicalConversationAvailable() async {
-        let bot = freshBot("reset-archive-fail")
-        defer { UserDefaults.standard.removeObject(forKey: key(bot)) }
-        let (model, host) = makeModel(bot: bot)
-        host.canonicalSessions[bot] = "old-id"
-        _ = await model.endlessSession(for: bot)
-        try? await host.setSessionTitle("old-id", title: AppModel.canonicalConversationTitle)
-        host.titleError = GatewayError.rpc(RPCError(code: 5003, message: "cannot archive"))
-        host.titleErrorForID = "old-id"
-
-        await model.resetEndlessSession(for: bot)
-
-        XCTAssertEqual(model.selectedSessionID, "old-id")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: key(bot)), "old-id")
-        XCTAssertEqual(host.storedTitles["old-id"], AppModel.canonicalConversationTitle)
-        XCTAssertNotEqual(host.storedTitles["created-\(bot)-1"], AppModel.canonicalConversationTitle,
-                          "the unarchivable old row must not be shadowed by a second canonical row")
-        let resolved = host.canonicalSessions[bot]
-            ?? host.storedTitles.first { $0.value == AppModel.canonicalConversationTitle }?.key
-        XCTAssertEqual(resolved, "old-id")
-        await model.stop()
-    }
-
-    /// Navigating to another bot while the old row is being archived cancels the reset. The old
-    /// title is restored and the replacement is not adopted, so neither history is stranded.
-    func testResetNavigationRestoresTheOldTitleAndDoesNotAttachTheReplacement() async {
-        let bot = freshBot("reset-navigation")
+    func testResetForAnotherBotTouchesNothing() async {
+        let bot = freshBot("reset-other")
         defer { UserDefaults.standard.removeObject(forKey: key(bot)) }
         let (model, host) = makeModel(bot: bot)
         host.canonicalSessions[bot] = "old-id"
         _ = await model.endlessSession(for: bot)
 
-        let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
-        let (release, releaseContinuation) = AsyncStream<Void>.makeStream()
-        host.onTitle = { id, title in
-            guard id == "old-id", title != AppModel.canonicalConversationTitle else { return }
-            enteredContinuation.yield(())
-            var iterator = release.makeAsyncIterator()
-            _ = await iterator.next()
-        }
-
-        let reset = Task { await model.resetEndlessSession(for: bot) }
-        var iterator = entered.makeAsyncIterator()
-        _ = await iterator.next()
         await model.selectBot("another-bot")
-        releaseContinuation.yield(())
-        await reset.value
+        await model.resetEndlessSession(for: bot)
 
         XCTAssertEqual(model.selectedBotID, "another-bot")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: key(bot)), "old-id")
-        XCTAssertEqual(host.storedTitles["old-id"], AppModel.canonicalConversationTitle,
-                       "navigation must not leave the old row archived with no replacement")
-        XCTAssertNotEqual(host.storedTitles["created-\(bot)-1"], AppModel.canonicalConversationTitle,
-                          "the abandoned replacement is not left in the canonical slot")
+        XCTAssertEqual(host.canonicalSessions[bot], "old-id")
+        XCTAssertTrue(host.createdSessions.isEmpty)
+        XCTAssertTrue(host.titleWrites.isEmpty)
+        XCTAssertTrue(model.lastSendError?.contains("not the open bot") == true)
         await model.stop()
     }
 
@@ -301,44 +241,6 @@ final class CanonicalConversationTests: XCTestCase {
         XCTAssertEqual(model.selectedBotID, beta,
                        "the older open must not switch the screen back")
         XCTAssertEqual(model.selectedSessionID, newer)
-        await model.stop()
-    }
-
-    /// Two reset presses overlap: they must share one transaction, not create two replacements
-    /// and archive the same history twice.
-    func testConcurrentResetsForOneBotCreateOneReplacement() async {
-        let bot = freshBot("concurrent-reset")
-        defer { UserDefaults.standard.removeObject(forKey: key(bot)) }
-        let (model, host) = makeModel(bot: bot)
-        host.canonicalSessions[bot] = "old-id"
-        _ = await model.endlessSession(for: bot)
-
-        let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
-        let (release, releaseContinuation) = AsyncStream<Void>.makeStream()
-        let gate = FirstCallGate()
-        host.onCreate = {
-            guard gate.shouldBlock() else { return }
-            enteredContinuation.yield(())
-            var iterator = release.makeAsyncIterator()
-            _ = await iterator.next()
-        }
-
-        let first = Task { await model.resetEndlessSession(for: bot) }
-        var iterator = entered.makeAsyncIterator()
-        _ = await iterator.next()
-        let second = Task { await model.resetEndlessSession(for: bot) }
-        try? await Task.sleep(nanoseconds: 30_000_000)
-
-        XCTAssertEqual(host.createdSessions.count, 1,
-                       "the second reset waits instead of creating a second replacement")
-        releaseContinuation.yield(())
-        await first.value
-        await second.value
-
-        XCTAssertEqual(host.createdSessions.count, 1)
-        XCTAssertEqual(host.titleWrites.filter { $0.0 == "old-id" }.count, 1,
-                       "the old conversation is archived exactly once")
-        XCTAssertEqual(model.selectedSessionID, "created-\(bot)-1")
         await model.stop()
     }
 

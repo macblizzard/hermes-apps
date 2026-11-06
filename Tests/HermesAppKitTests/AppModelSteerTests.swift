@@ -290,5 +290,79 @@ final class AppModelSteerTests: XCTestCase {
         XCTAssertEqual(consumed.count, 1)
         XCTAssertEqual(consumed.first?.1, "consume me")
     }
+
+    /// Switching away and back while the steer is on the wire resumes a transcript that may
+    /// already include the accepted instruction. It appears once, and only the exact accepted
+    /// composition is cleared — text typed afterwards stays.
+    func testAcceptedSteerAfterSwitchBackDuringResumeIsNotDuplicatedAndKeepsLaterEdits() async {
+        let (model, host) = await openModel()
+        await startLiveTurn(model: model, host: host)
+
+        let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
+        let (release, releaseContinuation) = AsyncStream<Void>.makeStream()
+        host.onSteer = {
+            enteredContinuation.yield(())
+            var iterator = release.makeAsyncIterator()
+            _ = await iterator.next()
+        }
+
+        var consumed: [(String, String)] = []
+        model.onDraftConsumed = { bot, text in consumed.append((bot, text)) }
+
+        model.draft = "accepted steer"
+        let steer = Task { await model.steer() }
+        var iterator = entered.makeAsyncIterator()
+        _ = await iterator.next()
+
+        await model.selectBot("beta")
+        // The host accepted the steer while we were away; the next resume includes its row.
+        host.entries = [
+            TranscriptEntry(id: "u1", role: .user, text: "start the turn"),
+            TranscriptEntry(id: "u-accepted", role: .user, text: "accepted steer"),
+        ]
+        await model.selectBot("alpha")
+        await model.select("s1")
+
+        // Newer words typed after the switch-back are a different composition.
+        model.draft = "later edits"
+        releaseContinuation.yield(())
+        await steer.value
+
+        let acceptedRows = model.transcript.filter { $0.role == .user && $0.text == "accepted steer" }
+        XCTAssertEqual(acceptedRows.count, 1,
+                       "the resume's accepted steer and the RPC reply are the same message")
+        XCTAssertEqual(model.draft, "later edits",
+                       "only the accepted composition is cleared")
+        XCTAssertEqual(consumed.map { $0.1 }, ["accepted steer"],
+                       "the parked copy of the accepted text is consumed")
+    }
+
+    /// When the resume did not include the steer, the success path still inserts it exactly once.
+    func testAcceptedSteerAfterSwitchBackIsInsertedOnceWhenResumeDidNotHaveIt() async {
+        let (model, host) = await openModel()
+        await startLiveTurn(model: model, host: host)
+
+        let (entered, enteredContinuation) = AsyncStream<Void>.makeStream()
+        let (release, releaseContinuation) = AsyncStream<Void>.makeStream()
+        host.onSteer = {
+            enteredContinuation.yield(())
+            var iterator = release.makeAsyncIterator()
+            _ = await iterator.next()
+        }
+
+        model.draft = "accepted later"
+        let steer = Task { await model.steer() }
+        var iterator = entered.makeAsyncIterator()
+        _ = await iterator.next()
+
+        await model.selectBot("beta")
+        await model.selectBot("alpha")
+        await model.select("s1")
+        releaseContinuation.yield(())
+        await steer.value
+
+        XCTAssertEqual(model.transcript.filter { $0.role == .user && $0.text == "accepted later" }.count,
+                       1)
+    }
 }
 #endif
