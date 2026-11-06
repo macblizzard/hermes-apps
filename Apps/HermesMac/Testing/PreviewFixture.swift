@@ -90,14 +90,19 @@ enum UITestFixture {
         if let cached = cachedStore { return cached }
 
         FixtureDefaults.reset(hostName: hostName)
+        NSLog("[uitest] step defaults reset")
         let client = FixtureGatewayClient()
         self.client = client
         isActive = true
-        let store = WorkspaceStore(model: AppModel(client: client, hostName: hostName),
+        NSLog("[uitest] step client built")
+        let model = AppModel(client: client, hostName: hostName)
+        NSLog("[uitest] step model built")
+        let store = WorkspaceStore(model: model,
                                    pairing: PairingAddress(baseURL: "wss://hermes-fixture.invalid",
                                                            deviceID: "",
                                                            token: "fixture-only"))
         cachedStore = store
+        NSLog("[uitest] step store built")
         return store
     }
 }
