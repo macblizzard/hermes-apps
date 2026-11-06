@@ -32,11 +32,16 @@ struct MacMarkdownText: View {
             .accessibilityLabel(String(attributed.characters))
     }
 
-    /// One `Text` per run, styled from the run's hermes attributes.
+    /// One `AttributedString`, styled run by run from the run's hermes attributes.
+    ///
+    /// This used to concatenate `Text` values, which was the stable way to mix fonts in a line but
+    /// silently dropped the one attribute that must survive: `.link`. Every URL in a reply rendered
+    /// underlined and dead. SwiftUI's own attribute scope carries font, colour, underline and link
+    /// on a single attributed string, and `Text` draws a `.link` run as a link.
     private var renderedText: Text {
-        var result = Text("")
+        var result = AttributedString()
         for run in attributed.runs {
-            let slice = String(attributed.characters[run.range])
+            let slice = attributed.characters[run.range]
             guard !slice.isEmpty else { continue }
 
             let attributes = run.attributes
@@ -57,27 +62,31 @@ struct MacMarkdownText: View {
                 font = font.italic()
             }
 
-            var segment = AttributedString(slice)
-            if let url = run.link { segment.link = url }
-            var piece = Text(segment).font(font)
+            var segment = AttributedString(String(slice))
+            segment.font = font
+
+            if let url = run.link {
+                segment.link = url
+            }
 
             if isLink {
-                piece = piece.foregroundColor(Tokens.accentText).underline()
+                segment.foregroundColor = Tokens.accentText
+                segment.underlineStyle = .single
             } else if token != nil {
-                piece = piece.foregroundColor(MacCodePalette.color(for: token))
+                segment.foregroundColor = MacCodePalette.color(for: token)
             } else if isMonospaced {
-                piece = piece.foregroundColor(isCodeBlock ? Tokens.textSecondary : Tokens.textPrimary)
+                segment.foregroundColor = isCodeBlock ? Tokens.textSecondary : Tokens.textPrimary
             } else {
-                piece = piece.foregroundColor(color)
+                segment.foregroundColor = color
             }
 
             if isStruck {
-                piece = piece.strikethrough()
+                segment.strikethroughStyle = .single
             }
 
-            result = result + piece
+            result.append(segment)
         }
-        return result
+        return Text(result)
     }
 }
 
