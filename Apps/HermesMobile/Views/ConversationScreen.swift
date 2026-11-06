@@ -79,6 +79,9 @@ struct ConversationScreen: View {
                 load: { botID in try await model.modelCatalog(for: botID) },
                 conversationIsOpen: true,
                 resetConversation: { model.resetEndlessSession(for: bot.id) },
+                saveDescription: { botID, text in
+                    try await model.configureDescription(botID: botID, description: text)
+                },
                 save: { botID, option, confirmed in
                     switch try await model.configureModel(botID: botID, model: option.id,
                                                           provider: option.provider,
