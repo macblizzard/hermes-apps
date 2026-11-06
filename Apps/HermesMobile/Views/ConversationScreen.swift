@@ -30,6 +30,14 @@ struct ConversationScreen: View {
     @State private var isDraggingTranscript = false
     @State private var showAttachmentPicker = false
 
+    /// One voice controller per conversation screen: recording, transcription and
+    /// playback share an audio session, so they must not race each other.
+    @StateObject private var voice = VoiceController()
+    /// Opt-in and never persisted: speaking replies is a per-visit choice.
+    @State private var speakReplies = false
+    @State private var lastSpokenEntryID: String?
+    @State private var showBotSettings = false
+
     private static let bottomID = "conversation-bottom"
 
     private var title: String { bot.displayName }
@@ -46,13 +54,39 @@ struct ConversationScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .safeAreaInset(edge: .top, spacing: 0) { headerStrip }
-        .task(id: bot.id) { await openConversation() }
+        .task(id: bot.id) {
+            voice.transport = app.makeVoiceTransport()
+            await openConversation()
+        }
+        .onChange(of: app.store.host) { _, _ in
+            // A re-pair or host switch changes the endpoint the controller may talk to.
+            voice.cancel()
+            voice.transport = app.makeVoiceTransport()
+        }
+        .onChange(of: model.transcript.count) { _, _ in
+            speakNewReplyIfNeeded()
+        }
         .onChange(of: model.pendingRequests.count) { count in
             let arrived = hasLoaded && count > lastSeenRequestCount
             lastSeenRequestCount = count
             guard arrived, model.pendingRequests.first != nil else { return }
             Haptics.approvalArrived()
             showApprovalSheet = true
+        }
+        .sheet(isPresented: $showBotSettings) {
+            BotModelSettingsScreen(
+                bot: bot,
+                load: { botID in try await model.modelCatalog(for: botID) },
+                conversationIsOpen: true,
+                resetConversation: { model.resetEndlessSession(for: bot.id) },
+                save: { botID, option, confirmed in
+                    switch try await model.configureModel(botID: botID, model: option.id,
+                                                          provider: option.provider,
+                                                          confirm: confirmed) {
+                    case .applied: return .saved
+                    case .confirmationRequired(let message): return .confirmationRequired(message)
+                    }
+                })
         }
         .sheet(isPresented: $showAttachmentPicker) {
             AttachmentPicker { result in
@@ -301,6 +335,12 @@ struct ConversationScreen: View {
                 }
 
                 Menu {
+                    Button {
+                        showBotSettings = true
+                    } label: {
+                        Label("Bot settings", systemImage: "gearshape")
+                    }
+
                     Button {
                         Task { await model.compressNow() }
                     } label: {

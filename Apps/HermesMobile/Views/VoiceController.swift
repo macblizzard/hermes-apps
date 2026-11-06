@@ -9,7 +9,10 @@ final class VoiceController: ObservableObject {
     enum State: Equatable { case idle, requestingPermission, recording, transcribing, synthesizing, playing }
     @Published private(set) var state: State = .idle
     @Published var errorMessage: String?
-    private let transport: VoiceTransport
+    /// Replaced when the pairing or the host changes; the controller owns no credentials.
+    var transport: VoiceTransport
+    /// The container the recorder writes, sent as the declared mime type.
+    static let recordingMimeType = "audio/mp4"
     private var recorder: AVAudioRecorder?
     private var player: AVAudioPlayer?
     private var fileURL: URL?
@@ -18,6 +21,9 @@ final class VoiceController: ObservableObject {
     private var generation = UUID()
     private var interruptionObserver: NSObjectProtocol?
     private let maxDuration: TimeInterval = 60
+
+    /// True while a tap would be ignored anyway; the controls use it to disable themselves.
+    var isBusy: Bool { state != .idle && state != .recording }
 
     init(transport: VoiceTransport = .unavailable) {
         self.transport = transport
@@ -106,7 +112,8 @@ final class VoiceController: ObservableObject {
                 let audio = try Data(contentsOf: url)
                 self.removeRecording()
                 guard !audio.isEmpty else { throw VoiceTransportError.emptyAudio }
-                let text = try await self.transport.transcribe(audio).trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = try await self.transport.transcribe(audio, VoiceController.recordingMimeType)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard self.generation == current, !Task.isCancelled else { return }
                 guard !text.isEmpty else { throw VoiceTransportError.emptyTranscript }
                 self.state = .idle
@@ -153,6 +160,13 @@ final class VoiceController: ObservableObject {
                 self.errorMessage = (error as? LocalizedError)?.errorDescription ?? "Voice playback failed."
             }
         }
+    }
+
+    /// Stops speech — synthesis in flight or audio already playing — without touching a
+    /// recording. The toggle calls this when the user turns replies off.
+    func stopSpeaking() {
+        guard state == .synthesizing || state == .playing else { return }
+        cancel()
     }
 
     func cancel() {

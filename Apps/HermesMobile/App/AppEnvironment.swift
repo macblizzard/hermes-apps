@@ -142,6 +142,31 @@ final class AppEnvironment: ObservableObject {
         if let error = botIconsError { throw NSError(domain: "BotIcons", code: 1, userInfo: [NSLocalizedDescriptionKey: "Saved, but could not refresh icons: \(error)"]) }
     }
 
+    // MARK: - Voice
+
+    /// The transport a conversation's `VoiceController` should use right now.
+    ///
+    /// Built from the *current* pairing, so a re-pair or a host switch cannot leave the
+    /// controller talking to the old host; each request then mints its own single-use
+    /// ticket inside `VoiceService`. Unpaired means `.unavailable`, which reports itself
+    /// instead of guessing a host.
+    func makeVoiceTransport() -> VoiceTransport {
+        guard let host = store.host, let token = store.refreshToken else { return .unavailable }
+        let service = VoiceService(baseURL: host.baseURL, freshTicket: {
+            try await BotIconService.mintTicket(baseURL: host.baseURL,
+                                                deviceID: host.deviceID,
+                                                refreshToken: token)
+        })
+        return VoiceTransport(
+            transcribe: { audio, mimeType in
+                try await service.transcribe(audio: audio, mimeType: mimeType)
+            },
+            synthesize: { text in
+                try await service.synthesize(text: text)
+            }
+        )
+    }
+
     // MARK: - Lifecycle
 
     /// Boot: mirror credentials, connect if there is a host, then fill in the facts the

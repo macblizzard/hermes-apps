@@ -333,6 +333,11 @@ public final class AppModel: ObservableObject {
             transcript = resumed.entries
             pendingRequests = resumed.openRequests
             adopt(resumed, session: id)
+        } catch is CancellationError {
+            // SwiftUI cancels the `.task` when the screen goes away — backgrounding, the app
+            // switcher, a pushed sheet. That is not a failed session, and surfacing it painted a
+            // red "could not open this session" banner every time the user came back.
+            return
         } catch {
             guard epoch == botEpoch, selectedSessionID == id else { return }
             // A session that cannot be opened is not a dead host: the socket is fine, and blaming
@@ -571,6 +576,9 @@ public final class AppModel: ObservableObject {
                 pendingRequests = resumed.openRequests
                 adopt(resumed, session: stored)
                 return stored
+            } catch is CancellationError {
+                // Leaving the screen cancels the open-in-flight; the next visit resumes normally.
+                return nil
             } catch {
                 // Only a session the host has forgotten is worth replacing; a timeout or a dead
                 // socket must be reported, never papered over with a new empty conversation.
@@ -633,8 +641,12 @@ public final class AppModel: ObservableObject {
         defer { isCompressing = false }
         do {
             try await client.compress(session: sid)
-            compactionNotice = "conversation compacted"
+            // Refresh first, then report: the notice is set last so nothing inside the refresh can
+            // overwrite it, and the context gauge is cleared because it showed the *pre*-compaction
+            // size. The next turn's `usage` is the first honest number after a compaction.
             await select(sid)
+            contextUsed = nil
+            compactionNotice = "conversation compacted"
         } catch {
             lastSendError = "could not compact: \(error.localizedDescription)"
         }
