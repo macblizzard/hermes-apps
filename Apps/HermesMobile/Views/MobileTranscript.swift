@@ -14,10 +14,14 @@ struct MobileTranscriptRow: View {
     let entry: TranscriptEntry
 
     var body: some View {
-        // Long-press gives the whole-block actions; the text itself already supports drag-selection
-        // (`.textSelection`), which is how you copy *part* of a message.
-        content
-            .contextMenu { menu }
+        // A message body owns its own copy menu, attached to the chrome around the
+        // text rather than to the text view: on iOS a `UITextView` claims long-press
+        // for selection, and that must stay the winning gesture inside the text.
+        if entry.role == .user || entry.role == .assistant {
+            content
+        } else {
+            content.contextMenu { menu }
+        }
     }
 
     @ViewBuilder
@@ -72,11 +76,9 @@ struct MobileTranscriptRow: View {
     private var userBubble: some View {
         HStack(alignment: .bottom, spacing: 8) {
             Spacer(minLength: 44)
-            Text(entry.text)
-                .font(TypeScale.font(TypeScale.chatBody))
-                .lineSpacing(TypeScale.chatLineSpacing)
-                .foregroundStyle(Tokens.textPrimary)
-                .multilineTextAlignment(.leading)
+            MobileSelectableText(attributed: MobileProse.plain(entry.text,
+                                                               color: Tokens.textPrimary,
+                                                               size: TypeScale.chatBody))
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -88,7 +90,11 @@ struct MobileTranscriptRow: View {
                     RoundedRectangle(cornerRadius: Tokens.radiusGrouped, style: .continuous)
                         .strokeBorder(Tokens.borderStrong, lineWidth: 1)
                 )
-                .textSelection(.enabled)
+                // On the bubble, not on the text view: inside the text a long press is
+                // the selection gesture, and the padding is the chrome that keeps the
+                // whole-message copy.
+                .contentShape(RoundedRectangle(cornerRadius: Tokens.radiusGrouped, style: .continuous))
+                .contextMenu { menu }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
     }
@@ -97,8 +103,13 @@ struct MobileTranscriptRow: View {
 
     private var assistant: some View {
         MobileMarkdownText(blocks: IncrementalMarkdown.parse(entry.text))
-            .textSelection(.enabled)
             .accessibilityLabel(entry.text)
+            // The padding is the chrome: long-pressing there gives the copy menu, and
+            // long-pressing the prose itself starts a selection in the text view.
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .contextMenu { menu }
     }
 
     /// A tool entry restored from the host's transcript projection.

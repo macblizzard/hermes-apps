@@ -98,7 +98,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: net.corvus.hermes.mobile
         PRODUCT_NAME: Hermes
         TARGETED_DEVICE_FAMILY: "1,2"
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 
 schemes:
   HermesMac:

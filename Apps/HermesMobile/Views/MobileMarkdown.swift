@@ -3,26 +3,67 @@ import HermesKit
 import HermesRender
 import OpenBotUI
 
-/// Markdown, drawn the way OpenBot draws a message: 16 pt on a 22 pt line, one block
-/// per paragraph, code in the mono face on the inset surface.
+/// Markdown, drawn the way OpenBot draws a message: 16 pt on a 22 pt line, code in
+/// the mono face on the inset surface, tables as a real grid.
 ///
-/// The block list comes from `HermesRender` (the block layer decides what is a paragraph,
-/// a fence or a rule); this file is only the mapping from a `Block` to pixels. Inline
-/// emphasis is built as concatenated `Text` rather than `AttributedString` because the
-/// app needs the *run* font and colour, and a `Text` run keeps them through composition.
+/// The block list comes from `HermesRender` (the block layer decides what is a
+/// paragraph, a fence, a table or a rule); this file is only the mapping from a
+/// `Block` to pixels. Prose runs are drawn by `MobileSelectableText` — a
+/// `UITextView` — because only UIKit gives a draggable selection on iOS; code,
+/// tables, quotes and rules stay SwiftUI views.
 struct MobileMarkdownText: View {
     let blocks: [Block]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                MobileMarkdownBlock(block: block)
+            ForEach(Array(Self.runs(of: blocks).enumerated()), id: \.offset) { _, run in
+                switch run {
+                case .prose(let prose):
+                    // One text view per run of consecutive prose: selection can cross
+                    // paragraph and list boundaries inside it, which is what a reader
+                    // dragging over a reply expects.
+                    MobileSelectableText(attributed: MobileProse.attributed(for: prose))
+                case .block(let block):
+                    MobileMarkdownBlock(block: block)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    /// A message is drawn as alternating runs: prose (one selectable text view) and
+    /// the blocks that are widgets (code, tables, quotes, rules).
+    enum MarkdownRun: Equatable {
+        case prose([Block])
+        case block(Block)
+    }
+
+    static func runs(of blocks: [Block]) -> [MarkdownRun] {
+        var runs: [MarkdownRun] = []
+        var prose: [Block] = []
+
+        func flushProse() {
+            guard !prose.isEmpty else { return }
+            runs.append(.prose(prose))
+            prose.removeAll()
+        }
+
+        for block in blocks {
+            if block.isProse {
+                prose.append(block)
+            } else {
+                flushProse()
+                runs.append(.block(block))
+            }
+        }
+        flushProse()
+        return runs
+    }
 }
 
+/// The fallback for a single block: used for code, tables, quotes and rules, and by
+/// callers that hand over one block directly. Prose normally arrives through a
+/// `MobileSelectableText` run instead (see `MobileMarkdownText`).
 private struct MobileMarkdownBlock: View {
     let block: Block
 
