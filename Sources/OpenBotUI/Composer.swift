@@ -1,5 +1,8 @@
 import Foundation
 import SwiftUI
+#if os(macOS)
+import AppKit
+#endif
 
 /// The message field.
 ///
@@ -32,6 +35,14 @@ public struct Composer: View {
     private let attachPopoverContent: AnyView?
 
     @FocusState private var focused: Bool
+
+    #if os(macOS)
+    /// The text view reports its own first-responder state: `@FocusState` cannot see an
+    /// `NSViewRepresentable`, and the border colour is driven by focus.
+    @State private var editorFocused = false
+    /// The height the editor asks for, so the card grows a line at a time.
+    @State private var editorHeight: CGFloat = 22
+    #endif
 
     public init(text: Binding<String>,
                 placeholder: String = "Ask Hermes anything",
@@ -130,9 +141,19 @@ public struct Composer: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: Tokens.radiusCard, style: .continuous)
-                .strokeBorder(focused ? Tokens.borderFocus : Tokens.borderStrong, lineWidth: 1)
+                .strokeBorder(isFieldFocused ? Tokens.borderFocus : Tokens.borderStrong, lineWidth: 1)
         )
         .opacity(isDisabled ? 0.6 : 1)
+    }
+
+    /// The border's focus state. The Mac's editor is an `NSTextView` and reports its own first
+    /// responder; the phone keeps `@FocusState`.
+    private var isFieldFocused: Bool {
+        #if os(macOS)
+        editorFocused
+        #else
+        focused
+        #endif
     }
 
     // MARK: Field
@@ -154,26 +175,36 @@ public struct Composer: View {
             .disabled(isDisabled)
     }
 
-    /// A multiline `TextField` submits only where the platform gives it a return key that
-    /// means "done". On the Mac the return key is a newline, so the send is taken from
-    /// the key press itself (Shift+Return stays a newline).
+    /// On the Mac the field is a real text view (see `ComposerTextView`), so Return sends and
+    /// Shift+Return breaks the line *at the caret* — the platform's own insert, not an append.
     private var field: some View {
         #if os(macOS)
-        baseField
-            // The no-modifier `onKeyPress(_:action:)` overload hands the closure no
-            // `KeyPress`, so it cannot see the Shift modifier. The phases form does.
-            .onKeyPress(phases: .down) { press in
-                guard press.key == .return else { return .ignored }
-                // Returning `.ignored` did not restore the field's own newline: once this
-                // handler has seen the press, pairing the insert with it is the only thing that
-                // actually breaks the line on macOS. (⌥⇧⏎ works because no handler matches it.)
-                if press.modifiers.contains(.shift) {
-                    text.append("\n")
-                    return .handled
-                }
-                send()
-                return .handled
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty {
+                Text(placeholder)
+                    .font(TypeScale.font(TypeScale.chatBody))
+                    .foregroundStyle(Tokens.textPlaceholder)
+                    .padding(.top, 3)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
+
+            ComposerTextView(text: $text,
+                             isFocused: $editorFocused,
+                             fontSize: TypeScale.chatBody,
+                             minHeight: controlSide - 4,
+                             // The design system's cap: past about eight lines the field scrolls
+                             // inside itself instead of eating the conversation.
+                             maxHeight: controlSide - 4 + TypeScale.chatLine * 7,
+                             isEditable: !isDisabled,
+                             onSend: { send() },
+                             onHeightChange: { height in
+                                 if abs(height - editorHeight) > 0.5 { editorHeight = height }
+                             })
+                .frame(height: editorHeight)
+        }
+        .frame(minHeight: controlSide - 4, alignment: .topLeading)
+        .padding(.vertical, 6)
         #else
         baseField
             .onSubmit { send() }
