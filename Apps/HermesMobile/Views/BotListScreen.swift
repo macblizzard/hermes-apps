@@ -50,7 +50,7 @@ struct BotListScreen: View {
     }
 
     private var hiddenBots: [Bot] {
-        model.bots.filter { model.isHidden($0.id) }
+        model.bots.filter { model.isHidden(botID: $0.id) }
     }
 
     private var trimmedQuery: String {
@@ -85,7 +85,7 @@ struct BotListScreen: View {
                     Section("Hidden") {
                         ForEach(hiddenBots) { bot in
                             Button {
-                                model.toggleHidden(bot.id)
+                                model.toggleHidden(botID: bot.id)
                             } label: {
                                 HStack {
                                     Text(bot.displayName).foregroundStyle(Tokens.textPrimary)
@@ -202,13 +202,13 @@ struct BotListScreen: View {
             Button { iconBot = bot } label: { Label("Bot icon", systemImage: "person.crop.circle") }
             Button { settingsBot = bot } label: { Label("Bot Settings", systemImage: "gearshape") }
             Button {
-                model.togglePin(bot.id)
+                model.togglePin(botID: bot.id)
             } label: {
-                Label(model.isPinned(bot.id) ? "Unpin" : "Pin to top",
-                      systemImage: model.isPinned(bot.id) ? "pin.slash" : "pin")
+                Label(model.isPinned(botID: bot.id) ? "Unpin" : "Pin to top",
+                      systemImage: model.isPinned(botID: bot.id) ? "pin.slash" : "pin")
             }
             Button(role: .destructive) {
-                model.toggleHidden(bot.id)
+                model.toggleHidden(botID: bot.id)
             } label: {
                 Label("Hide bot", systemImage: "eye.slash")
             }
