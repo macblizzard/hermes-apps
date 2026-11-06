@@ -13,6 +13,10 @@ struct ConversationPane: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
 
+    /// The bot this pane last announced as visible, so a teardown cannot clear the dot of the bot
+    /// that replaced it (the shell re-creates the pane per bot).
+    @State private var shownBotID: String?
+
     var body: some View {
         VStack(spacing: 0) {
             ConversationHeader(model: model, store: store)
@@ -44,6 +48,31 @@ struct ConversationPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Tokens.canvas)
+        // Mirrors the phone: the conversation that is on screen is the one whose replies count as
+        // read; leaving it (or switching bots) hands the unread dot back to the list.
+        .onAppear {
+            shownBotID = model.selectedBotID
+            model.setVisibleBot(model.selectedBotID)
+        }
+        .onChange(of: model.selectedBotID) { _, botID in
+            shownBotID = botID
+            model.setVisibleBot(botID)
+        }
+        .onDisappear {
+            // Only if this pane's bot is still the visible one: a teardown that lands after the
+            // next bot's appearance must not erase the dot state for the bot now on screen.
+            if model.visibleBotID == shownBotID {
+                model.setVisibleBot(nil)
+            }
+        }
+        // Bot change and appearance both land here, so the chip is never a bot behind.
+        .task(id: model.selectedBotID) {
+            await store.refreshOpenBotModelLabel()
+        }
+        .onChange(of: model.connection) { _ in
+            // The chip is a host fact: re-ask when the wire comes back.
+            Task { await store.refreshOpenBotModelLabel() }
+        }
     }
 
     /// The transcript is only drawn for a session that is in the *current* bot's list.

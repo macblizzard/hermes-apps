@@ -31,6 +31,14 @@ struct WorkspaceRoot: View {
         .sheet(isPresented: $store.isPairSheetPresented) {
             PairHostSheet(store: store)
         }
+        // One sheet, two doors: the sidebar's context menu and the conversation's menu both set
+        // `botSettingsBot`, so the per-bot settings live in a single place.
+        .sheet(item: $store.botSettingsBot) { bot in
+            MacBotSettingsSheet(model: store.model,
+                                store: store,
+                                bot: bot,
+                                conversationIsOpen: store.model.selectedBotID == bot.id)
+        }
     }
 }
 

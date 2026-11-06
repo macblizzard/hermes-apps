@@ -51,6 +51,9 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSMinimumSystemVersion: "14.0"
         NSHighResolutionCapable: true
+        # The AppIcon.appiconset is compiled into Assets.car by actool; this key is
+        # what Finder/Dock look up on macOS 11+. Harmless if the build also injects it.
+        CFBundleIconName: AppIcon
         NSHumanReadableCopyright: "Personal build"
     settings:
       base:
@@ -58,7 +61,7 @@ targets:
         PRODUCT_NAME: Hermes
         ENABLE_HARDENED_RUNTIME: "NO"
         COMBINE_HIDPI_IMAGES: "YES"
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 
   HermesMobile:
     type: application

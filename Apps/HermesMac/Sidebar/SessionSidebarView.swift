@@ -3,13 +3,20 @@ import HermesKit
 import OpenBotUI
 import SwiftUI
 
-/// The session list pane: groups, run state, search, and the host chip at the foot.
+/// The session list pane: bots, groups, run state, search, and the host chip at the foot.
 ///
 /// Under 110 pt the same pane becomes the compact avatar strip — the collapse rule from
 /// `Geometry.sidebarCollapseBelow`, not a separate mode the user has to find.
+///
+/// The bots block is the phone's bot list on the desktop (`SidebarBotList`): it carries the
+/// description, the unread dot, pin/hide and the filter that reveals hidden bots. The sessions
+/// below it belong to the bot the block has selected.
 struct SessionSidebarView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
+
+    /// Hidden bots are a view preference; this reveals them so nothing becomes unreachable.
+    @State private var showsHiddenBots = false
 
     private var sections: [SessionSection] {
         SessionGrouping.sections(sessions: model.sessions,
@@ -26,6 +33,11 @@ struct SessionSidebarView: View {
                 hostDot
             } else {
                 header
+                if store.isPaired, !model.bots.isEmpty {
+                    SidebarBotList(model: model, store: store, showsHiddenBots: $showsHiddenBots)
+                        .padding(.horizontal, 6)
+                        .padding(.bottom, 8)
+                }
                 MacSidebarSearchField(text: $store.searchText)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 10)

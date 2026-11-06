@@ -1,3 +1,4 @@
+import Foundation
 import HermesAppKit
 import HermesKit
 import OpenBotUI
@@ -33,6 +34,17 @@ struct ConversationHeader: View {
         return .idle
     }
 
+    /// `deepseek-v4.1-flash` fits; a provider-qualified id does not, and the chip is `fixedSize`,
+    /// so it is shortened here rather than pushing the header's controls out of the strip.
+    private var modelChipLabel: String? {
+        guard let raw = store.openBotModelLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        let words = raw.split(separator: " ")
+        let short = words.prefix(2).joined(separator: " ")
+        guard !short.isEmpty else { return nil }
+        return short.count <= 22 ? short : String(short.prefix(21)) + "…"
+    }
+
     var body: some View {
         HStack(spacing: 9) {
             Avatar(title, size: .small, presence: presence)
@@ -52,6 +64,12 @@ struct ConversationHeader: View {
             }
 
             Spacer(minLength: 8)
+
+            // The open bot's own model, from the profile-scoped catalogue — never the gateway's
+            // default, which is what a chip reading an unscoped call names.
+            if let label = modelChipLabel {
+                StatusChip(label, tone: .neutral, size: .small)
+            }
 
             if model.isStreaming {
                 StatusChip("running", tone: .success, showsDot: true, size: .small)
@@ -83,9 +101,13 @@ struct ConversationHeader: View {
 
     private var moreMenu: some View {
         Menu {
+            if let bot = store.selectedBot {
+                Button("Bot settings") { store.openBotSettings(bot) }
+                Divider()
+            }
             if !model.bots.isEmpty {
                 Menu("Switch bot") {
-                    ForEach(model.bots) { bot in
+                    ForEach(model.orderedBots) { bot in
                         Button(bot.id == model.selectedBotID ? "✓ \(bot.displayName)" : bot.displayName) {
                             store.selectBot(bot.id)
                         }

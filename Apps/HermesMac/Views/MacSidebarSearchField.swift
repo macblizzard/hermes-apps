@@ -8,6 +8,8 @@ import OpenBotUI
 /// The session filter. Local text field with the palette's control geometry.
 struct MacSidebarSearchField: View {
     @Binding var text: String
+    /// The field says what it filters; the settings sheet searches a model catalogue with it.
+    var prompt: String = "Search sessions"
 
     @FocusState private var focused: Bool
 
@@ -19,13 +21,13 @@ struct MacSidebarSearchField: View {
 
             TextField("",
                       text: $text,
-                      prompt: Text("Search sessions").foregroundColor(Tokens.textPlaceholder))
+                      prompt: Text(prompt).foregroundColor(Tokens.textPlaceholder))
                 .textFieldStyle(.plain)
                 .font(TypeScale.font(Tokens.textSM))
                 .foregroundStyle(Tokens.textPrimary)
                 .tint(Tokens.accent)
                 .focused($focused)
-                .accessibilityLabel("Search sessions")
+                .accessibilityLabel(prompt)
 
             if !text.isEmpty {
                 Button {
@@ -36,7 +38,7 @@ struct MacSidebarSearchField: View {
                         .foregroundStyle(Tokens.textDim)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Clear the session search")
+                .accessibilityLabel("Clear the search")
             }
         }
         .padding(.horizontal, 9)

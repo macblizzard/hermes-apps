@@ -33,7 +33,7 @@ struct BotRail: View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 4) {
-                    ForEach(model.bots) { bot in
+                    ForEach(model.orderedBots) { bot in
                         botButton(bot)
                             .id(bot.id)
                     }
@@ -52,6 +52,7 @@ struct BotRail: View {
 
     private func botButton(_ bot: Bot) -> some View {
         let isSelected = bot.id == model.selectedBotID
+        let isPinned = model.isPinned(botID: bot.id)
         return Button {
             guard !isSelected else { return }
             Haptics.selection()
@@ -66,9 +67,44 @@ struct BotRail: View {
                     RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous)
                         .fill(isSelected ? Tokens.controlActive : .clear)
                 )
+                .overlay(alignment: .topTrailing) {
+                    // The same green dot as the list: a reply arrived for a bot that was not open.
+                    if model.hasUnread(bot.id) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                            .offset(x: 2, y: -2)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .overlay(alignment: .bottomLeading) {
+                    if isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 7, weight: .semibold))
+                            .foregroundStyle(Tokens.textMuted)
+                            .offset(x: 3, y: 1)
+                            .accessibilityHidden(true)
+                    }
+                }
                 .contentShape(RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous))
         }
         .buttonStyle(PressableButtonStyle())
+        .contextMenu {
+            Button { store.openBotSettings(bot) } label: {
+                Label("Bot Settings", systemImage: "gearshape")
+            }
+            Button {
+                model.togglePin(botID: bot.id)
+            } label: {
+                Label(isPinned ? "Unpin" : "Pin to top",
+                      systemImage: isPinned ? "pin.slash" : "pin")
+            }
+            Button(role: .destructive) {
+                model.toggleHidden(botID: bot.id)
+            } label: {
+                Label("Hide bot", systemImage: "eye.slash")
+            }
+        }
         .help(bot.displayName)
         .accessibilityLabel(bot.displayName)
         .accessibilityValue(isSelected ? "Current bot" : "")
@@ -76,8 +112,6 @@ struct BotRail: View {
 
     /// Live state is only known for the bot whose sessions are loaded. The others stay
     /// `idle` rather than borrowing the selected bot's ring or dot.
-    // TODO(bot-model): switch to per-bot attention when `Bot` carries a running/pending
-    // bit of its own; a dot on another bot today would be a guess.
     private func presence(for bot: Bot) -> Avatar.Presence {
         guard bot.id == model.selectedBotID else { return .idle }
         if model.hasPendingRequests { return .needsYou }

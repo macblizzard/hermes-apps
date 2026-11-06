@@ -25,6 +25,15 @@ final class WorkspaceStore: ObservableObject {
     @Published var isPalettePresented = false
     @Published var searchText = ""
     @Published var showsContextPanel = true
+    /// The bot whose settings sheet is open; `nil` closes it. Both the sidebar's context menu and
+    /// the conversation's menu set this, so there is one sheet and one owner.
+    @Published var botSettingsBot: Bot? = nil
+    /// The open bot's own profile default, for the header chip.
+    ///
+    /// `AppModel.modelLabel` is read once per connect and per endless-session open; the Mac opens
+    /// plain sessions, so after a bot switch it would still name the previous bot. This asks the
+    /// same profile-scoped catalogue call and is refreshed whenever the open bot changes.
+    @Published private(set) var openBotModelLabel: String?
     @Published private(set) var sidebarWidth: CGFloat = Geometry.sidebarDefault
 
     /// Set the first time the user asks to connect, so the empty sidebar can tell
@@ -85,6 +94,27 @@ final class WorkspaceStore: ObservableObject {
         selectedBot?.displayName ?? model.hostName
     }
 
+    /// Open one bot's settings, from wherever the user asked for it.
+    func openBotSettings(_ bot: Bot) {
+        botSettingsBot = bot
+    }
+
+    /// Ask the host for the open bot's current model, scoped to that profile.
+    ///
+    /// Silent on failure: no chip is honest, a stale or gateway-wide model name is the bug this
+    /// replaces. Called when the workspace appears, when the bot changes, and after a settings write.
+    func refreshOpenBotModelLabel() async {
+        guard let id = model.selectedBotID else {
+            openBotModelLabel = nil
+            return
+        }
+        do {
+            openBotModelLabel = try await model.modelCatalog(for: id).current?.label
+        } catch {
+            openBotModelLabel = nil
+        }
+    }
+
     // MARK: Bots
 
     /// Re-read the host's bot directory. `AppModel.start()` already does this on connect;
@@ -113,6 +143,8 @@ final class WorkspaceStore: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             await self.model.selectBot(id)
+            // The chip names the bot on screen: re-read that bot's own default.
+            await self.refreshOpenBotModelLabel()
             if let first = self.model.sessions.first {
                 await self.model.select(first.id)
                 self.model.draft = self.drafts[first.id] ?? ""
@@ -404,7 +436,8 @@ final class WorkspaceStore: ObservableObject {
 
         // The bots are a catalogue of their own: one command per profile, disabled for the
         // one already on screen, so switching is reachable without leaving the keyboard.
-        for bot in model.bots {
+        // `orderedBots` is the same list the sidebar draws — pinned first, hidden ones absent.
+        for bot in model.orderedBots {
             items.append(WorkspaceCommand(
                 id: "bot.\(bot.id)",
                 title: "Switch to \(bot.displayName)",
