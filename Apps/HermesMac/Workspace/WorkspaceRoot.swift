@@ -5,9 +5,10 @@ import SwiftUI
 
 /// The window: a `Tokens.frame` surround with the workspace clipped inside it.
 ///
-/// The surround is the app's one piece of theatre and it is exact — 8 pt on three sides,
-/// 28 pt on top so the hidden title bar's traffic lights sit on the frame colour rather than
-/// on the canvas.
+/// The surround is the app's one piece of theatre and it is exact — 8 pt on the sides and the
+/// bottom only. The top is flush with the window edge: the hidden title bar's traffic lights sit
+/// on the panels' own backgrounds (the sidebar's fill runs behind them) instead of on an empty
+/// 28 pt band of frame colour above both panes.
 ///
 /// Inside is the phone's information architecture, not a desktop three-pane one: **one panel on
 /// the left listing bots, the chat on the right**. There is no session list to browse, no session
@@ -28,7 +29,10 @@ struct WorkspaceRoot: View {
                         .strokeBorder(Tokens.borderStrong, lineWidth: 1)
                 )
                 .padding(.horizontal, 8)
-                .padding(.top, 28)
+                // No top inset: the shell reaches the window edge, so the sidebar's fill and the
+                // conversation's canvas are what the traffic lights are drawn on. The window's own
+                // rounded mask still shapes the top corners; the 13 pt clip below is what rounds
+                // the bottom ones inside the frame.
                 .padding(.bottom, 8)
 
             paletteOverlay
@@ -131,6 +135,12 @@ struct WorkspaceRoot: View {
 struct WorkspaceShell: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
+
+    /// The strip the hidden title bar's traffic lights occupy, measured from the window's top
+    /// edge. The panels paint their backgrounds through it; only the sidebar's *content* starts
+    /// below it, so the buttons never land on the search field. 26 pt clears the buttons' 20 pt
+    /// baseline by 6 and is 2 pt under a standard 28 pt title bar's height.
+    static let titlebarStrip: CGFloat = 26
 
     private var sidebarBinding: Binding<CGFloat> {
         Binding(get: { store.sidebarWidth },

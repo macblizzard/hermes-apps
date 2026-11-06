@@ -39,6 +39,15 @@ struct MacComposerBar: View {
         return "⏎ or ⌘↩ send · ⇧⏎ newline · ⌘K commands"
     }
 
+    /// The bar's height with one line in it, and nothing else showing.
+    ///
+    /// Counted off `Composer`: 6 pt above the field row, a 22 pt field (the design system's
+    /// `controlSide - 4` floor), 2 pt below it, the 6 pt stack gap, then the caption hint and its
+    /// 7 pt bottom padding — 60 pt in all. The field is what should grow, so the rest height is
+    /// this plus the 18 pt that turns the 22 pt field into a 44 pt one: room for a wrapped line
+    /// and a half, while still leaving a short window most of its transcript.
+    static let restingHeight: CGFloat = 78
+
     var body: some View {
         VStack(spacing: 0) {
             // A failed transcription uses the strip a failed send uses: one place to look when
@@ -79,6 +88,16 @@ struct MacComposerBar: View {
                      // control is `MacVoiceRow` above; both call the same toggle.
                      onMic: { toggleVoice() },
                      onInterrupt: interrupt)
+                // A taller resting field. `Composer` gives the field a 22 pt floor and leaves it
+                // flexible above that (its multiline `TextField` grows with the text), so the
+                // extra height goes to the field and the paperclip, the send arrow and the hint
+                // row ride down with it — the stack is bottom-aligned, the card is one surface.
+                // Writing a paragraph is the common desktop case; at 22 pt it looked like the
+                // second line would not fit. Growth past this rest height still comes from the
+                // text itself: the design system caps the field at eight lines (≈160 pt, where
+                // it starts scrolling inside) and that cap is left to `Composer`, not repeated
+                // here.
+                .frame(minHeight: MacComposerBar.restingHeight)
                 // Measured, then inset. Padding first shrank the field to 592 pt and put its left
                 // edge 24 pt inside every other column's.
                 .frame(maxWidth: Geometry.conversationMeasure)

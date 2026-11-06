@@ -7,8 +7,9 @@ import SwiftUI
 ///
 /// The rail's avatars stay the fastest switch; this list is the phone's bot list brought to the
 /// desktop: the profile's description under its name, a green dot for a reply that arrived while
-/// the conversation was not on screen, pin/hide from the row's context menu, and one filter in the
-/// block's own caption row so a hidden bot is never out of reach.
+/// the conversation was not on screen, pin/hide from the row's context menu. The filter is the
+/// panel's search field (`BotSidebarView`), applied here against name and id, so the list needs no
+/// caption row of its own: the field says what the block is.
 ///
 /// Ordering is `AppModel.orderedBots` — pinned first, then last activity — so both surfaces agree.
 struct SidebarBotList: View {
@@ -16,15 +17,36 @@ struct SidebarBotList: View {
     @ObservedObject var store: WorkspaceStore
     /// View preference, not a stored one: hidden bots stay hidden across launches via the model.
     @Binding var showsHiddenBots: Bool
+    /// The live search text. Empty means "every bot"; otherwise name and id are matched
+    /// case-insensitively, and hidden bots are matched by the same rule.
+    var query: String = ""
     /// True when this block *is* the left panel rather than a strip above a session list: the
     /// rows then take every point the window offers instead of stopping after about five.
     var fillsAvailableHeight: Bool = false
 
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isSearching: Bool { !trimmedQuery.isEmpty }
+
     /// Hidden bots are excluded by the model's ordering, so this is the visible list.
-    private var visibleBots: [Bot] { model.orderedBots }
+    private var visibleBots: [Bot] { model.orderedBots.filter(matches) }
 
     private var hiddenBots: [Bot] {
-        model.bots.filter { model.isHidden(botID: $0.id) }
+        model.bots.filter { model.isHidden(botID: $0.id) && matches($0) }
+    }
+
+    /// Name first, then id: a bot called "Cody" whose profile id is `cody` answers to either.
+    private func matches(_ bot: Bot) -> Bool {
+        guard isSearching else { return true }
+        return bot.displayName.localizedCaseInsensitiveContains(trimmedQuery)
+            || bot.id.localizedCaseInsensitiveContains(trimmedQuery)
+    }
+
+    /// Nothing to draw: no matching visible bots and no matching hidden ones to reveal.
+    private var isFilteredEmpty: Bool {
+        visibleBots.isEmpty && !(showsHiddenBots && !hiddenBots.isEmpty)
     }
 
     private var rowCount: Int {
@@ -39,46 +61,12 @@ struct SidebarBotList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            captionRow
-                .padding(.horizontal, 8)
-
-            if visibleBots.isEmpty, !(showsHiddenBots && !hiddenBots.isEmpty) {
-                emptyRow
+            if isFilteredEmpty {
+                emptyState
             } else {
                 rows
             }
         }
-    }
-
-    // MARK: Caption and filter
-
-    private var captionRow: some View {
-        HStack(spacing: 6) {
-            SectionCaption("BOTS")
-
-            if model.botsLoading {
-                SpinningRing(color: Tokens.textDim, size: 8, lineWidth: 1.3)
-            }
-
-            Spacer(minLength: 4)
-
-            Menu {
-                // Same control as the phone's list filter: a switch, not a second list.
-                Toggle("Show hidden bots", isOn: $showsHiddenBots)
-            } label: {
-                Image(systemName: "line.3.horizontal.decrease.circle")
-                    .font(TypeScale.font(TypeScale.label))
-                    .foregroundStyle(showsHiddenBots ? Tokens.accentText : Tokens.textDim)
-                    .frame(minWidth: 24, minHeight: 24)
-                    .contentShape(Rectangle())
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help("Bot list filters")
-            .accessibilityLabel("Bot list filters")
-        }
-        .padding(.bottom, 1)
     }
 
     // MARK: Rows
@@ -229,12 +217,34 @@ struct SidebarBotList: View {
         .accessibilityLabel("Show \(bot.displayName)")
     }
 
-    private var emptyRow: some View {
-        Text(model.botsLoading ? "Asking the host which bots it serves…" : (hiddenBots.isEmpty ? "No bots found on this host." : "All bots are hidden. Use the filter to show them."))
-            .font(TypeScale.font(TypeScale.caption))
-            .foregroundStyle(Tokens.textDim)
+    /// One row that says why the block is empty. A query with no hits names the query, so a
+    /// mistyped search cannot be mistaken for a host that has no bots.
+    @ViewBuilder
+    private var emptyState: some View {
+        if isSearching {
+            Text("No bots match \"\(trimmedQuery)\"")
+                .font(TypeScale.font(TypeScale.caption))
+                .foregroundStyle(Tokens.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+        } else if model.botsLoading {
+            HStack(spacing: 8) {
+                SpinningRing(color: Tokens.textDim, size: 9, lineWidth: 1.3)
+                Text("Asking the host which bots it serves…")
+                    .font(TypeScale.font(TypeScale.caption))
+                    .foregroundStyle(Tokens.textDim)
+            }
             .padding(.horizontal, 8)
             .padding(.vertical, 2)
+        } else {
+            Text(hiddenBots.isEmpty ? "No bots found on this host." : "All bots are hidden. Use the filter to show them.")
+                .font(TypeScale.font(TypeScale.caption))
+                .foregroundStyle(Tokens.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+        }
     }
 
     // MARK: Facts
@@ -278,6 +288,28 @@ private struct SidebarBotListPreview: View {
     }
 }
 
+private struct SidebarBotListFilteredPreview: View {
+    @StateObject private var store = PreviewWorkspace.store()
+    @State private var showsHidden = false
+
+    var body: some View {
+        SidebarBotList(model: store.model,
+                       store: store,
+                       showsHiddenBots: $showsHidden,
+                       query: "cod")
+            .padding(.horizontal, 6)
+            // The panel's floor, where the rows and the empty state both have to hold.
+            .frame(width: WorkspaceStore.sidebarFloor)
+            .background(Tokens.sidebar)
+            .task { await store.attachPreviewHost() }
+            .preferredColorScheme(.dark)
+    }
+}
+
 #Preview("Sidebar bots") {
     SidebarBotListPreview()
+}
+
+#Preview("Sidebar bots · filtered at the 200 pt floor") {
+    SidebarBotListFilteredPreview()
 }

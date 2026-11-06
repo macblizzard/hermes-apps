@@ -10,8 +10,10 @@ import SwiftUI
 /// conversation in the pane on the right. There is no session browser under it, no session
 /// search, and no "new session" button: a bot has one conversation, and the app resumes it.
 ///
-/// The host chip stays at the foot because connection, reconnect and latency have to be reachable
-/// even when no bot is selected (or the host listed none).
+/// The header is one row of chrome: the bot filter (a field, not an icon that opens one), the
+/// hidden-bots filter and Settings. There is no footer — the list takes the panel's last point.
+/// Connection, reconnect, latency, pairing and devices live in Settings ▸ Connection, which stays
+/// reachable with no bot selected and no host paired.
 struct BotSidebarView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
@@ -19,15 +21,18 @@ struct BotSidebarView: View {
     /// Hidden bots are a view preference; this reveals them so nothing becomes unreachable.
     @State private var showsHiddenBots = false
 
+    /// The live bot filter. Matched case-insensitively against name and id by `SidebarBotList`.
+    @State private var searchQuery = ""
+
     var body: some View {
         VStack(spacing: 0) {
             header
-            // The list takes every point left between the header and the host chip: on this
-            // screen the bots *are* the panel, not a block above a session list.
+            // The list takes every point left under the header: on this screen the bots *are*
+            // the panel, not a block above a session list and not a block above a footer chip.
             content
                 .padding(.horizontal, Geometry.sidebarInset)
+                .padding(.bottom, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            HostStatusBar(model: model, store: store)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Tokens.sidebar)
@@ -35,24 +40,33 @@ struct BotSidebarView: View {
 
     // MARK: Header
 
-    /// No title of its own: the bot block's caption already says "BOTS", and a second heading
-    /// over a list of three rows is one too many. The row holds the two verbs that are not
-    /// attached to a particular bot — the palette and Settings.
+    /// The panel's only chrome row: search, list filters, Settings.
+    ///
+    /// The former magnifier was the command palette; the palette is still ⌘K and still in the
+    /// Conversation menu, while the magnifier's understandable meaning — search — is now the
+    /// field itself. The field leads the row and takes the remaining width, so at the 200 pt
+    /// floor the two 24 pt buttons are the only fixed size in it.
     private var header: some View {
-        HStack(spacing: 4) {
-            if model.botsLoading {
-                SpinningRing(color: Tokens.textDim, size: 9, lineWidth: 1.4)
-            }
+        HStack(spacing: 6) {
+            MacSidebarSearchField(text: $searchQuery, prompt: "Search bots")
+                .accessibilityIdentifier("sidebar.botSearch")
+                .layoutPriority(1)
 
-            Spacer(minLength: 0)
-
-            OpenBotIconButton("magnifyingglass",
-                              label: store.isPalettePresented
-                                  ? "Close the command palette (⌘K)"
-                                  : "Command palette (⌘K)",
-                              size: .small) {
-                store.togglePalette()
+            Menu {
+                // Same control as the phone's list filter: a switch, not a second list.
+                Toggle("Show hidden bots", isOn: $showsHiddenBots)
+            } label: {
+                Image(systemName: "line.3.horizontal.decrease.circle")
+                    .font(TypeScale.font(TypeScale.label))
+                    .foregroundStyle(showsHiddenBots ? Tokens.accentText : Tokens.textDim)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Bot list filters")
+            .accessibilityLabel("Bot list filters")
 
             SettingsLink {
                 Image(systemName: "gearshape")
@@ -66,8 +80,10 @@ struct BotSidebarView: View {
             .accessibilityLabel("Settings")
         }
         .padding(.horizontal, Geometry.sidebarInset)
-        .padding(.top, 8)
-        .padding(.bottom, 2)
+        // The traffic-light strip: the panel's fill runs to the window's top edge, the field
+        // starts under the buttons.
+        .padding(.top, WorkspaceShell.titlebarStrip)
+        .padding(.bottom, 6)
     }
 
     // MARK: Content
@@ -90,8 +106,8 @@ struct BotSidebarView: View {
             SidebarBotList(model: model,
                            store: store,
                            showsHiddenBots: $showsHiddenBots,
+                           query: searchQuery,
                            fillsAvailableHeight: true)
-                .padding(.bottom, 6)
         }
     }
 
@@ -232,10 +248,26 @@ private struct BotSidebarEmptyPreview: View {
     }
 }
 
+private struct BotSidebarFloorPreview: View {
+    @StateObject private var store = PreviewWorkspace.store()
+
+    var body: some View {
+        // The panel at its 200 pt floor: search field, two buttons, rows.
+        BotSidebarView(model: store.model, store: store)
+            .frame(width: WorkspaceStore.sidebarFloor, height: 640)
+            .task { await store.attachPreviewHost() }
+            .preferredColorScheme(.dark)
+    }
+}
+
 #Preview("Bot panel") {
     BotSidebarPreview()
 }
 
 #Preview("Bot panel · no bots") {
     BotSidebarEmptyPreview()
+}
+
+#Preview("Bot panel · 200 pt floor") {
+    BotSidebarFloorPreview()
 }
