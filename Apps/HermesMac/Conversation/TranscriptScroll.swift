@@ -44,6 +44,7 @@ struct TranscriptScroll: View {
                         .accessibilityIdentifier("conversationSearchField")
                     Text(query.isEmpty ? "" : matches.isEmpty ? "No matches" : "\(min(matchIndex + 1, matches.count)) of \(matches.count)")
                         .font(.caption)
+                        .accessibilityIdentifier("conversationSearchCount")
                     Button { moveMatch(-1) } label: { Image(systemName: "chevron.up") }
                         .disabled(matches.isEmpty).accessibilityLabel("Previous search result")
                     Button { moveMatch(1) } label: { Image(systemName: "chevron.down") }
@@ -53,6 +54,8 @@ struct TranscriptScroll: View {
                     Spacer()
                     Button { searching = true; searchFocused = true } label: { Image(systemName: "magnifyingglass") }
                         .keyboardShortcut("f", modifiers: .command)
+                        .accessibilityIdentifier("conversationSearchToggle")
+                        .accessibilityLabel("Search conversation")
                         .help("Search conversation")
                 }
             }.padding(.horizontal, 24).padding(.top, 8)

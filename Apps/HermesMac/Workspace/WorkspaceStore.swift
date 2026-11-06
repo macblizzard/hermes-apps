@@ -312,6 +312,24 @@ final class WorkspaceStore: ObservableObject {
         send()
     }
 
+    // MARK: Voice
+
+    /// Voice input needs a refresh token: each transcription mints its own short-lived ticket,
+    /// and a ticket-only pairing has already spent its single one on the socket upgrade.
+    var canTranscribeVoice: Bool { pairing.map { !$0.isTicketOnly } ?? false }
+
+    /// Transcribe captured audio on the paired host.
+    ///
+    /// `MacVoiceService` mints a fresh single-use ticket per call from this window's pairing, so
+    /// a host switch or a re-pair is picked up without the composer holding any credential. Read
+    /// at call time, not cached: nothing outlives one recording.
+    func transcribeVoice(_ audio: Data, mimeType: String) async throws -> String {
+        guard let address = pairing, !address.isTicketOnly else {
+            throw MacVoiceFailure.devicePairingRequired
+        }
+        return try await MacVoiceService(address: address).transcribe(audio: audio, mimeType: mimeType)
+    }
+
     // MARK: Approvals
 
     func approve(_ request: ServerRequest) {

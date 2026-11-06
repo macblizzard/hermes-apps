@@ -11,7 +11,11 @@ import SwiftUI
 /// the palette's verb and the pair sheet's Pair press.
 @main
 struct HermesMacApp: App {
-    @StateObject private var store = WorkspaceStore()
+    /// Ordinary launch: `WorkspaceStore()`, which restores whatever was paired last time.
+    /// UI-test launch: a frozen, offline store built by `UITestFixture`, which is only ever
+    /// reachable through the two launch arguments it checks (see that file). The store and the
+    /// one `.task` below are the entire hook; nothing else about the window changes.
+    @StateObject private var store = UITestFixture.storeForLaunch()
 
     var body: some Scene {
         WindowGroup("Hermes") {
@@ -19,6 +23,9 @@ struct HermesMacApp: App {
                 .frame(minWidth: Geometry.serverRailMacOS + Geometry.sidebarMin + Geometry.conversationMin,
                        minHeight: 560)
                 .preferredColorScheme(.dark)
+                // No-op unless the fixture launch argument was given: the real window connects
+                // nothing at launch, on purpose.
+                .task { await store.attachFixtureHostIfNeeded() }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1320, height: 840)

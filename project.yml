@@ -55,6 +55,9 @@ targets:
         # what Finder/Dock look up on macOS 11+. Harmless if the build also injects it.
         CFBundleIconName: AppIcon
         NSHumanReadableCopyright: "Personal build"
+        # Pressing record captures the Mac's default input device. macOS terminates an app that
+        # opens a capture input without this string, so the prompt is the whole feature.
+        NSMicrophoneUsageDescription: "Record a voice message to transcribe with your Hermes host."
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.corvus.hermes.mac
