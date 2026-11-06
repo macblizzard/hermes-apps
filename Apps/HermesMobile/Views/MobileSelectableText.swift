@@ -16,11 +16,13 @@ import OpenBotUI
 /// `LazyVStack` can lay it out like any other row.
 struct MobileSelectableText: UIViewRepresentable {
     let attributed: NSAttributedString
+    var allowsSelection = false
 
     func makeUIView(context: Context) -> UITextView {
         // TextKit 1: `layoutManager.usedRect` is what makes the height exact, and
         // it is still the predictable path for non-scrolling text views.
-        let view = UITextView(usingTextLayoutManager: false)
+        let view = MessageTextView(usingTextLayoutManager: false)
+        view.allowsSelection = allowsSelection
         view.isEditable = false
         view.isSelectable = true
         view.isScrollEnabled = false
@@ -46,6 +48,7 @@ struct MobileSelectableText: UIViewRepresentable {
     }
 
     func updateUIView(_ view: UITextView, context: Context) {
+        (view as? MessageTextView)?.allowsSelection = allowsSelection
         // Streaming re-renders this view several times a second; assigning an equal
         // string would collapse a selection the reader is dragging.
         guard !view.attributedText.isEqual(to: attributed) else { return }
@@ -69,6 +72,17 @@ struct MobileSelectableText: UIViewRepresentable {
         // A definite height from the first pass is what stops the row jumping once
         // the text view lays out.
         return CGSize(width: width, height: ceil(used.height))
+    }
+}
+
+/// Keep taps on links, but let the row's context menu win long presses. The
+/// dedicated selection sheet restores the native text-selection gestures.
+private final class MessageTextView: UITextView {
+    var allowsSelection = false
+
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if !allowsSelection && gestureRecognizer is UILongPressGestureRecognizer { return false }
+        return super.gestureRecognizerShouldBegin(gestureRecognizer)
     }
 }
 

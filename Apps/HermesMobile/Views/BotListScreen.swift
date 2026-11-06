@@ -74,7 +74,7 @@ struct BotListScreen: View {
             }
             if model.botsLoading && model.bots.isEmpty {
                 loadingRow
-            } else if filtered.isEmpty {
+            } else if filtered.isEmpty && !(showHidden && !hiddenBots.isEmpty) {
                 emptySection
             } else {
                 ForEach(filtered) { bot in
@@ -102,6 +102,7 @@ struct BotListScreen: View {
         .scrollContentBackground(.hidden)
         .background(Tokens.canvas)
         .navigationTitle("Hermes Bots")
+        .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query,
                     placement: .navigationBarDrawer(displayMode: .always),
                     prompt: "Search bots")
@@ -151,12 +152,17 @@ struct BotListScreen: View {
         } label: {
             HStack(spacing: 12) {
                 if let icon = app.botIcons[bot.id] {
-                    BotIconPortrait(icon, size: 48)
+                    BotIconPortrait(icon, size: 48,
+                                    isWorking: model.isStreaming && model.selectedBotID == bot.id)
                 } else {
                     Avatar(bot.displayName,
                        size: .large,
                        presence: .idle,
                        initials: bot.avatarInitials)
+                        .overlay {
+                            BotWorkingSparks(size: 44, color: Tokens.accentText,
+                                             isWorking: model.isStreaming && model.selectedBotID == bot.id)
+                        }
                 }
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -391,7 +397,12 @@ struct BotListScreen: View {
             // next screen, and a filter sitting there reads like navigation.
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Toggle("Show hidden bots", isOn: $showHidden)
+                    Button {
+                        showHidden.toggle()
+                    } label: {
+                        Label("Show hidden bots", systemImage: showHidden ? "checkmark" : "circle")
+                    }
+                    .accessibilityValue(showHidden ? "On" : "Off")
                 } label: {
                     Image(systemName: "line.3.horizontal.decrease.circle")
                 }

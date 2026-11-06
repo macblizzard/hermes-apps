@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 import UIKit
 import HermesKit
 import HermesRender
@@ -12,11 +13,57 @@ import OpenBotUI
 /// has. Markers come from the block layer so a list looks the same everywhere.
 struct MobileTranscriptRow: View {
     let entry: TranscriptEntry
+    @EnvironmentObject private var app: AppEnvironment
+    @State private var showingSelection = false
+    @AppStorage("mobile.messageReactions.v1") private var storedReactions = "{}"
+    private static let speaker = AVSpeechSynthesizer()
+    private static let emojis = ["👍", "❤️", "😂", "😮", "😢", "🎉"]
+
+    private var reactionKey: String? {
+        guard let rowID = entry.rowID, let session = app.model.selectedSessionID else { return nil }
+        // Length-prefixed components cannot collide even when identifiers contain separators.
+        return [app.hostLabel, app.model.selectedBotID ?? "", session, String(rowID)]
+            .map { "\($0.utf8.count):\($0)" }.joined()
+    }
+
+    private var reactions: [String: String] {
+        guard let data = storedReactions.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return decoded
+    }
+
+    private func setReaction(_ emoji: String) {
+        guard let key = reactionKey else { return }
+        var values = reactions
+        values[key] = values[key] == emoji ? nil : emoji
+        if let data = try? JSONEncoder().encode(values), let encoded = String(data: data, encoding: .utf8) {
+            storedReactions = encoded
+        }
+    }
 
     var body: some View {
-        // A message body owns its own copy menu, attached to the chrome around the
-        // text rather than to the text view: on iOS a `UITextView` claims long-press
-        // for selection, and that must stay the winning gesture inside the text.
+        VStack(alignment: entry.role == .user ? .trailing : .leading, spacing: 4) {
+            rowContent
+            if let key = reactionKey, let emoji = reactions[key] {
+                Button(emoji) { setReaction(emoji) }
+                    .accessibilityLabel("Remove reaction \(emoji)")
+            }
+        }
+        .sheet(isPresented: $showingSelection) {
+            NavigationStack {
+                ScrollView {
+                    MobileSelectableText(attributed: MobileProse.plain(entry.text), allowsSelection: true)
+                        .padding()
+                }
+                .navigationTitle("Select Text")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingSelection = false } } }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var rowContent: some View {
         if entry.role == .user || entry.role == .assistant {
             content
         } else {
@@ -42,6 +89,26 @@ struct MobileTranscriptRow: View {
 
     @ViewBuilder
     private var menu: some View {
+        if entry.role == .user || entry.role == .assistant {
+            Button { showingSelection = true } label: {
+                Label("Select Text", systemImage: "text.cursor")
+            }
+            Button {
+                Self.speaker.stopSpeaking(at: .immediate)
+                Self.speaker.speak(AVSpeechUtterance(string: entry.text))
+            } label: {
+                Label("Read Aloud", systemImage: "speaker.wave.2")
+            }
+            if reactionKey != nil {
+                Menu {
+                    ForEach(Self.emojis, id: \.self) { emoji in
+                        Button(emoji) { setReaction(emoji) }
+                    }
+                } label: {
+                    Label("Add reaction", systemImage: "face.smiling")
+                }
+            }
+        }
         Button {
             UIPasteboard.general.string = entry.text
             Haptics.success()
@@ -90,9 +157,6 @@ struct MobileTranscriptRow: View {
                     RoundedRectangle(cornerRadius: Tokens.radiusGrouped, style: .continuous)
                         .strokeBorder(Tokens.borderStrong, lineWidth: 1)
                 )
-                // On the bubble, not on the text view: inside the text a long press is
-                // the selection gesture, and the padding is the chrome that keeps the
-                // whole-message copy.
                 .contentShape(RoundedRectangle(cornerRadius: Tokens.radiusGrouped, style: .continuous))
                 .contextMenu { menu }
         }
@@ -104,8 +168,6 @@ struct MobileTranscriptRow: View {
     private var assistant: some View {
         MobileMarkdownText(blocks: IncrementalMarkdown.parse(entry.text))
             .accessibilityLabel(entry.text)
-            // The padding is the chrome: long-pressing there gives the copy menu, and
-            // long-pressing the prose itself starts a selection in the text view.
             .padding(.vertical, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
@@ -405,6 +467,7 @@ struct MobileTranscriptEmpty: View {
         .padding(16)
     }
     .background(Tokens.canvas)
+    .environmentObject(AppEnvironment.preview())
     .preferredColorScheme(.dark)
 }
 

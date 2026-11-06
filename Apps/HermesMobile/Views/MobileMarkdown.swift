@@ -165,27 +165,25 @@ private func mobileInlineText(_ source: String,
                               size: CGFloat,
                               weight: Font.Weight = .regular,
                               color: Color = Tokens.textSecondary) -> Text {
-    var output = Text(verbatim: "")
+    var output = AttributedString()
     for span in InlineMarkdown.spans(source) {
-        var piece = Text(span.text)
-        if span.styles.contains(.code) {
-            piece = piece
-                .font(.system(.subheadline, design: .monospaced))
-                .foregroundColor(Tokens.accentText)
-        } else {
-            piece = piece
-                .font(TypeScale.font(size, weight: weight))
-                .foregroundColor(color)
+        var piece = AttributedString(span.text)
+        var font: Font = span.styles.contains(.code)
+            ? .system(.subheadline, design: .monospaced)
+            : TypeScale.font(size, weight: weight)
+        if span.styles.contains(.strong) { font = font.bold() }
+        if span.styles.contains(.emphasis) { font = font.italic() }
+        piece.font = font
+        piece.foregroundColor = span.styles.contains(.code) ? Tokens.accentText : color
+        if span.styles.contains(.strikethrough) { piece.strikethroughStyle = .single }
+        if let link = span.link {
+            piece.link = link
+            piece.foregroundColor = Tokens.accentText
+            piece.underlineStyle = .single
         }
-        if span.styles.contains(.strong) { piece = piece.bold() }
-        if span.styles.contains(.emphasis) { piece = piece.italic() }
-        if span.styles.contains(.strikethrough) { piece = piece.strikethrough() }
-        if span.link != nil {
-            piece = piece.foregroundColor(Tokens.accentText).underline()
-        }
-        output = output + piece
+        output.append(piece)
     }
-    return output
+    return Text(output)
 }
 
 // MARK: - Tables
