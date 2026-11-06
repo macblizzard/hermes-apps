@@ -19,7 +19,10 @@ final class HermesMacSmokeTests: XCTestCase {
         app.launch()
         app.activate()
         let window = app.windows.firstMatch
-        XCTAssertTrue(window.waitForExistence(timeout: 60), "Hermes did not open a window")
+        if !window.waitForExistence(timeout: 60) {
+            XCTFail("Hermes did not open a window (state=\(app.state.rawValue))\n\(app.debugDescription.prefix(4000))")
+            return
+        }
         // `isHittable` reports focus, and a hosted runner's window is not always focused even
         // though it is on screen; existence after activation is the honest check here.
         XCTAssertTrue(window.exists, "Hermes window is not visible")

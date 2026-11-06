@@ -146,7 +146,12 @@ final class HermesMacConversationUITests: XCTestCase {
     func testNormalLaunchDoesNotShowFixtureContent() {
         app.launch()
         app.activate()
-        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 60), "Hermes did not open a window")
+        if !app.windows.firstMatch.waitForExistence(timeout: 60) {
+            // Say what the process did, not just that no window appeared: a terminated app means a
+            // crash at launch, a running app with no window means the scene never rendered.
+            XCTFail("Hermes did not open a window (state=\(app.state.rawValue))\n\(app.debugDescription.prefix(4000))")
+            return
+        }
 
         // Ask the cheap collection (static texts) rather than a whole-tree descendants query:
         // without the fixture this launch may be showing a pairing sheet, and the generic query

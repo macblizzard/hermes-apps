@@ -78,6 +78,22 @@ jobs:
             -resultBundlePath build/HermesMacUI.xcresult \
             -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" test
+      - name: Collect app crash reports and console log
+        if: always()
+        run: |
+          mkdir -p build/diagnostics
+          # A UI test that fails with "no window" is usually a launch-time crash; these are the only
+          # places that say so.
+          cp -R "$HOME/Library/Logs/DiagnosticReports" build/diagnostics/ 2>/dev/null || true
+          log show --last 15m --predicate 'process == "Hermes"' --style compact \
+            > build/diagnostics/hermes-console.log 2>/dev/null || true
+          ls -la build/diagnostics || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: HermesMac-ui-diagnostics
+          path: build/diagnostics
+          if-no-files-found: warn
       - name: Export screenshots from result bundle
         if: always()
         run: |
