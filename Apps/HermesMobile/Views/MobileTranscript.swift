@@ -20,9 +20,12 @@ struct MobileTranscriptRow: View {
     private static let emojis = ["👍", "❤️", "😂", "😮", "😢", "🎉"]
 
     private var reactionKey: String? {
-        guard let rowID = entry.rowID, let session = app.model.selectedSessionID else { return nil }
+        guard let session = app.model.selectedSessionID else { return nil }
+        // Live messages may not have a durable history row yet; allow a temporary reaction too.
+        // It can only persist across reloads when the host provides a stable row ID.
+        let messageID = entry.rowID.map { "row:\($0)" } ?? "live:\(entry.id)"
         // Length-prefixed components cannot collide even when identifiers contain separators.
-        return [app.hostLabel, app.model.selectedBotID ?? "", session, String(rowID)]
+        return [app.hostLabel, app.model.selectedBotID ?? "", session, messageID]
             .map { "\($0.utf8.count):\($0)" }.joined()
     }
 
