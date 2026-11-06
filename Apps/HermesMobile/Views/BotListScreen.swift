@@ -108,7 +108,13 @@ struct BotListScreen: View {
                     prompt: "Search bots")
         .refreshable {
             await app.loadBots()
+            // A pull-to-refresh is a request for what is on the host *now*, so the cached preview
+            // lines are dropped rather than trusted.
+            await model.loadBotPreviews(force: true)
         }
+        // First fill: one `session.list` per bot, bounded and cached, so the rows get their third
+        // line without a pull.
+        .task { await model.loadBotPreviews() }
         .toolbar { toolbarContent }
         .sheet(item: $settingsBot) { bot in
             BotModelSettingsScreen(
@@ -184,6 +190,16 @@ struct BotListScreen: View {
                         .font(TypeScale.font(TypeScale.sessionPreview))
                         .foregroundStyle(Tokens.textMuted)
                         .lineLimit(1)
+
+                    // Third line: the newest thing this bot said, straight from the host. Omitted
+                    // rather than faked when the host has no line for this bot yet.
+                    if let preview = model.botPreviews[bot.id] {
+                        Text(preview)
+                            .font(TypeScale.font(TypeScale.sessionPreview))
+                            .foregroundStyle(Tokens.textDim)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
 
                 Spacer(minLength: 8)

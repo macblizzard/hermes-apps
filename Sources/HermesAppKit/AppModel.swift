@@ -182,6 +182,13 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var visibleBotID: String?
     /// Bots with a reply the user has not looked at yet. Local, like the rest of the list state.
     @Published public private(set) var unreadBots: Set<String> = []
+
+    /// The first line of each bot's newest message, for the bot list's third line.
+    ///
+    /// Only the host knows this: a bot the user has not opened has no transcript on this device,
+    /// and `session.list` answers a `preview` — the newest message, flattened. Keyed by bot id so
+    /// a switch never shows one bot's line under another's name.
+    @Published public private(set) var botPreviews: [String: String] = [:]
     /// Hidden bots disappear from the list without touching the host: this is a view preference.
     @Published public private(set) var hiddenBots: Set<String> = []
 
@@ -296,6 +303,49 @@ public final class AppModel: ObservableObject {
             // A silent gateway must not look like "no sessions" — surface it.
             connection = .failed("could not load sessions: \(error.localizedDescription)")
         }
+    }
+
+    /// Fill in the bot list's preview lines, one `session.list` per bot.
+    ///
+    /// Cheap only if it stays lazy and bounded: bots already cached are skipped, and four calls
+    /// are in flight at a time. On a host with fifteen profiles a serial sweep is fifteen round
+    /// trips deep before the list stops being two lines per row, and a cold profile can take
+    /// seconds to answer its first `session.list`.
+    public func loadBotPreviews(force: Bool = false) async {
+        let wanted = bots.map(\.id).filter { force || botPreviews[$0] == nil }
+        guard !wanted.isEmpty else { return }
+        let client = self.client
+        let batch = 4
+        var start = 0
+        while start < wanted.count {
+            let chunk = Array(wanted[start ..< min(start + batch, wanted.count)])
+            start += batch
+            await withTaskGroup(of: (String, String?).self) { group in
+                for bot in chunk {
+                    group.addTask {
+                        let rows = try? await client.listSessions(limit: 1,
+                                                                 profile: bot,
+                                                                 includeHidden: true)
+                        return (bot, rows?.first?.preview)
+                    }
+                }
+                for await (bot, preview) in group {
+                    // A bot that answers nothing keeps whatever it had: absence is not "empty".
+                    if let line = Self.previewLine(preview) { botPreviews[bot] = line }
+                }
+            }
+        }
+    }
+
+    /// The one line a bot row has room for: first non-blank line, clipped.
+    public static func previewLine(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let line = text
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
+        guard let line, !line.isEmpty else { return nil }
+        return String(line.prefix(120))
     }
 
     /// Switch bots.
@@ -1147,6 +1197,10 @@ public final class AppModel: ObservableObject {
             flushLiveTools()
             if !finalText.isEmpty {
                 transcript.append(TranscriptEntry(id: UUID().uuidString, role: .assistant, text: finalText))
+            }
+            // The list's third line follows the conversation without waiting for a re-list.
+            if let bot = selectedBotID, let line = Self.previewLine(finalText) {
+                botPreviews[bot] = line
             }
             streamingText = ""
             isStreaming = false

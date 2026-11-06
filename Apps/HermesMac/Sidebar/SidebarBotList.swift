@@ -56,8 +56,13 @@ struct SidebarBotList: View {
     /// The block sizes to its content and stops growing at about five rows, then scrolls.
     private var listHeight: CGFloat {
         let hiddenExtra = showsHiddenBots && !hiddenBots.isEmpty ? 24 : 0
-        return min(CGFloat(max(rowCount, 1)) * 39 + CGFloat(hiddenExtra) + 2, 208)
+        return min(CGFloat(max(rowCount, 1)) * SidebarBotList.rowHeight + CGFloat(hiddenExtra) + 2,
+                   SidebarBotList.rowHeight * 5 + 2)
     }
+
+    /// Name, description, last message: three lines at caption sizes, plus the row's own padding.
+    /// One number, used by both the row and the block's height cap, so they cannot drift apart.
+    static let rowHeight: CGFloat = 54
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -136,6 +141,17 @@ struct SidebarBotList: View {
                         .foregroundStyle(Tokens.textMuted)
                         .lineLimit(1)
                         .truncationMode(.tail)
+
+                    // The third line every chat app has: what was said last. Absent until the host
+                    // answers for that bot, and then it is the host's own newest message, never a
+                    // line borrowed from another bot.
+                    if let preview = model.botPreviews[bot.id] {
+                        Text(preview)
+                            .font(TypeScale.font(TypeScale.caption))
+                            .foregroundStyle(Tokens.textDim)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                 }
 
                 Spacer(minLength: 4)
@@ -150,7 +166,7 @@ struct SidebarBotList: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .frame(height: 38)
+            .frame(height: SidebarBotList.rowHeight)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
