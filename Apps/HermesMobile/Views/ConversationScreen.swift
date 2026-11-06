@@ -31,7 +31,6 @@ struct ConversationScreen: View {
     @State private var isDraggingTranscript = false
     @State private var showAttachmentMenu = false
     @State private var attachmentSource: AttachmentSource?
-    @State private var showFileImporter = false
 
     /// One voice controller per conversation screen: recording, transcription and
     /// playback share an audio session, so they must not race each other.
@@ -72,25 +71,12 @@ struct ConversationScreen: View {
         case .photos:
             attachmentSource = .photos
         case .files:
-            showFileImporter = true
+            attachmentSource = .files
         }
     }
 
     private func closeAttachmentMenu() {
         showAttachmentMenu = false
-    }
-
-    /// A picked file is read off the main thread — a coordinated read of a 40 MB HEIC and its
-    /// downsample is long enough to freeze the composer — and the scope is released only after
-    /// the bytes are in memory.
-    private func importFile(at url: URL) {
-        let scoped = url.startAccessingSecurityScopedResource()
-        DispatchQueue.global(qos: .userInitiated).async {
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            let result: Result<AttachmentPayload, Error>
-            do { result = .success(try AttachmentRead.file(at: url)) } catch { result = .failure(error) }
-            DispatchQueue.main.async { accept(result) }
-        }
     }
 
     private var title: String { bot.displayName }
@@ -167,16 +153,8 @@ struct ConversationScreen: View {
                 AttachmentPhotos(completion: { accept($0) },
                                  cancel: { attachmentSource = nil }).ignoresSafeArea()
             case .files:
-                // Files is a `.fileImporter`, never a sheet; `pick` never routes it here.
-                EmptyView()
-            }
-        }
-        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item]) { result in
-            switch result {
-            case .success(let url):
-                importFile(at: url)
-            case .failure(let error):
-                accept(.failure(error))
+                AttachmentFiles(completion: { accept($0) },
+                                cancel: { attachmentSource = nil })
             }
         }
         .sheet(isPresented: $showApprovalSheet) {
@@ -584,6 +562,7 @@ struct ConversationScreen: View {
                      placeholder: "Message \(title)",
                      isSending: model.isBusy,
                      isDisabled: sessionID == nil,
+                     hasAttachments: !model.pendingAttachments.isEmpty,
                      onSend: { Task { await model.send() } },
                      onAttach: {
                          withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
@@ -641,8 +620,12 @@ struct ConversationScreen: View {
             HStack(spacing: 8) {
                 ForEach(model.pendingAttachments) { attachment in
                     HStack(spacing: 6) {
-                        Image(systemName: attachment.isImage ? "photo" : "doc")
-                            .font(.system(size: 11))
+                        if attachment.isImage {
+                            AttachmentThumbnail(data: attachment.data, size: 26)
+                        } else {
+                            Image(systemName: "doc")
+                                .font(.system(size: 11))
+                        }
                         Text(attachment.name)
                             .font(TypeScale.font(TypeScale.sm))
                             .lineLimit(1)

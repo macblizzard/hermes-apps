@@ -433,7 +433,11 @@ public final class AppModel: ObservableObject {
 
     public func send() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, let sid = selectedSessionID, !sending else { return }
+        // An attachment on its own is a complete message: a PDF with no comment is a normal thing
+        // to send, and refusing it here made "attach a file, tap send" look like a dead button.
+        guard let sid = selectedSessionID, !sending,
+              !text.isEmpty || !pendingAttachments.isEmpty else { return }
+        let attachedNames = pendingAttachments.map(\.name)
         sending = true
         lastSendError = nil
         draft = ""
@@ -458,12 +462,17 @@ public final class AppModel: ObservableObject {
                 return // keep both the words and the attachments: nothing was sent
             }
         }
-        let outgoing = refs.isEmpty ? text : refs.joined(separator: "\n") + "\n\n" + text
+        let outgoing = text.isEmpty
+            ? refs.joined(separator: "\n")
+            : (refs.isEmpty ? text : refs.joined(separator: "\n") + "\n\n" + text)
 
         let optimisticID = UUID().uuidString
         // An interrupted turn leaves its cards live; they belong to that turn, above this message.
         flushLiveTools()
-        transcript.append(TranscriptEntry(id: optimisticID, role: .user, text: text))
+        // The bubble shows what the user typed; an attachment-only send names its files instead of
+        // rendering an empty row.
+        let bubbleText = text.isEmpty ? attachedNames.joined(separator: ", ") : text
+        transcript.append(TranscriptEntry(id: optimisticID, role: .user, text: bubbleText))
         streamingText = ""
         reasoningText = ""
         compactionNotice = nil
