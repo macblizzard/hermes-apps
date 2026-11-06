@@ -85,7 +85,14 @@ struct ConversationHeader: View {
 
     private func header(width: CGFloat) -> some View {
         HStack(spacing: 9) {
-            Avatar(title, size: .small, presence: presence)
+            // The bot's own portrait, the same one the sidebar row shows. The chat used to fall
+            // back to a lettered circle, so the header and the row that opened it disagreed about
+            // which bot this was.
+            if let bot = store.selectedBot, let icon = store.botIcons[bot.id] {
+                BotIconPortrait(icon, size: 26, isWorking: model.isStreaming)
+            } else {
+                Avatar(title, size: .small, presence: presence)
+            }
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
