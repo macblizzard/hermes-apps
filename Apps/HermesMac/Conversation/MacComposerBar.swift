@@ -87,7 +87,13 @@ struct MacComposerBar: View {
                      // `Composer` keeps the hook but draws no microphone glyph, so the visible
                      // control is `MacVoiceRow` above; both call the same toggle.
                      onMic: { toggleVoice() },
-                     onInterrupt: interrupt)
+                     onInterrupt: interrupt,
+                     // Anchored on the paperclip, not on the card: the menu used to drop from
+                     // the middle of the composer, under the field, nowhere near the clip.
+                     attachPopoverPresented: $showsAttachmentMenu,
+                     attachPopoverContent: AnyView(
+                        MacAttachmentMenu(model: model, isPresented: $showsAttachmentMenu)
+                     ))
                 // A taller resting field. `Composer` gives the field a 22 pt floor and leaves it
                 // flexible above that (its multiline `TextField` grows with the text), so the
                 // extra height goes to the field and the paperclip, the send arrow and the hint
@@ -105,10 +111,6 @@ struct MacComposerBar: View {
                 .padding(.top, 10)
                 .padding(.bottom, 14)
                 .frame(maxWidth: .infinity)
-                // Anchored under the bar, where the paperclip that opened it sits.
-                .popover(isPresented: $showsAttachmentMenu, arrowEdge: .bottom) {
-                    MacAttachmentMenu(model: model, isPresented: $showsAttachmentMenu)
-                }
         }
         .background(Tokens.canvas)
         .onAppear { wireVoice() }

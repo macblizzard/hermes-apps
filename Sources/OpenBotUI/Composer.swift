@@ -23,6 +23,13 @@ public struct Composer: View {
     private let onAttach: (() -> Void)?
     private let onMic: (() -> Void)?
     private let onInterrupt: (() -> Void)?
+    /// A popover the paperclip itself anchors, rather than one hung off the whole card.
+    ///
+    /// The Mac's attach menu is a two-item popover, and presenting it from the composer's outer
+    /// frame put it under the *field* — nowhere near the clip that opened it. Both halves are
+    /// optional so the phone, which pushes a sheet, passes neither.
+    private let attachPopoverPresented: Binding<Bool>?
+    private let attachPopoverContent: AnyView?
 
     @FocusState private var focused: Bool
 
@@ -38,7 +45,9 @@ public struct Composer: View {
                 onSend: @escaping () -> Void,
                 onAttach: (() -> Void)? = nil,
                 onMic: (() -> Void)? = nil,
-                onInterrupt: (() -> Void)? = nil) {
+                onInterrupt: (() -> Void)? = nil,
+                attachPopoverPresented: Binding<Bool>? = nil,
+                attachPopoverContent: AnyView? = nil) {
         _text = text
         self.placeholder = placeholder
         self.isSending = isSending
@@ -52,6 +61,8 @@ public struct Composer: View {
         self.onAttach = onAttach
         self.onMic = onMic
         self.onInterrupt = onInterrupt
+        self.attachPopoverPresented = attachPopoverPresented
+        self.attachPopoverContent = attachPopoverContent
     }
 
     /// The desktop hint line, in OpenBot's own words. The phone has no hint line.
@@ -88,10 +99,7 @@ public struct Composer: View {
 
             HStack(alignment: .bottom, spacing: 8) {
                 if showsAttach {
-                    OpenBotIconButton("paperclip",
-                                      label: "Attach a file",
-                                      size: .small,
-                                      isDisabled: isDisabled) { onAttach?() }
+                    attachControl
                 }
 
                 field
@@ -156,7 +164,13 @@ public struct Composer: View {
             // `KeyPress`, so it cannot see the Shift modifier. The phases form does.
             .onKeyPress(phases: .down) { press in
                 guard press.key == .return else { return .ignored }
-                if press.modifiers.contains(.shift) { return .ignored }
+                // Returning `.ignored` did not restore the field's own newline: once this
+                // handler has seen the press, pairing the insert with it is the only thing that
+                // actually breaks the line on macOS. (⌥⇧⏎ works because no handler matches it.)
+                if press.modifiers.contains(.shift) {
+                    text.append("\n")
+                    return .handled
+                }
                 send()
                 return .handled
             }
@@ -167,6 +181,21 @@ public struct Composer: View {
     }
 
     // MARK: Controls
+
+    /// The paperclip. When a caller supplies a popover, it is anchored *here* — on the 26 pt
+    /// button — so the menu drops from the clip instead of from the middle of the composer card.
+    @ViewBuilder
+    private var attachControl: some View {
+        let button = OpenBotIconButton("paperclip",
+                                       label: "Attach a file",
+                                       size: .small,
+                                       isDisabled: isDisabled) { onAttach?() }
+        if let presented = attachPopoverPresented, let content = attachPopoverContent {
+            button.popover(isPresented: presented, arrowEdge: .top) { content }
+        } else {
+            button
+        }
+    }
 
     private var sendButton: some View {
         Button(action: send) {
