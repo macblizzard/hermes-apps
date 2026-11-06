@@ -28,6 +28,7 @@ struct ConversationScreen: View {
     @State private var keyboardScreenSize: CGSize = .zero
     @State private var keyboardScrollTask: Task<Void, Never>?
     @State private var isDraggingTranscript = false
+    @State private var showAttachmentPicker = false
 
     private static let bottomID = "conversation-bottom"
 
@@ -52,6 +53,18 @@ struct ConversationScreen: View {
             guard arrived, model.pendingRequests.first != nil else { return }
             Haptics.approvalArrived()
             showApprovalSheet = true
+        }
+        .sheet(isPresented: $showAttachmentPicker) {
+            AttachmentPicker { result in
+                showAttachmentPicker = false
+                switch result {
+                case .success(let payload):
+                    model.addPendingAttachment(name: payload.name, data: payload.data,
+                                               isImage: payload.isImage)
+                case .failure(let error):
+                    notice = error.localizedDescription
+                }
+            }
         }
         .sheet(isPresented: $showApprovalSheet) {
             MobileApprovalSheet(model: model, request: model.pendingRequests.first)
@@ -338,6 +351,10 @@ struct ConversationScreen: View {
                 sendErrorBar(error)
             }
 
+            if !model.pendingAttachments.isEmpty {
+                pendingAttachmentsBar
+            }
+
             Hairline(color: Tokens.border)
 
             Composer(text: $model.draft,
@@ -345,7 +362,7 @@ struct ConversationScreen: View {
                      isSending: model.isBusy,
                      isDisabled: sessionID == nil,
                      onSend: { Task { await model.send() } },
-                     onAttach: { notice = "Attachments arrive with the file-handling milestone." },
+                     onAttach: { showAttachmentPicker = true },
                      onMic: { notice = "Dictation arrives with the voice milestone." },
                      onInterrupt: { Task { await model.interrupt() } })
                 .padding(.horizontal, 12)
@@ -353,6 +370,37 @@ struct ConversationScreen: View {
                 .padding(.bottom, 8)
         }
         .background(Tokens.canvas)
+    }
+
+    /// Picked attachments wait here until the user sends, so cancelling the composer uploads nothing.
+    private var pendingAttachmentsBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(model.pendingAttachments) { attachment in
+                    HStack(spacing: 6) {
+                        Image(systemName: attachment.isImage ? "photo" : "doc")
+                            .font(.system(size: 11))
+                        Text(attachment.name)
+                            .font(TypeScale.font(TypeScale.sm))
+                            .lineLimit(1)
+                        Button {
+                            model.removePendingAttachment(attachment.id)
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove \(attachment.name)")
+                    }
+                    .foregroundStyle(Tokens.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Tokens.surface, in: Capsule())
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+        }
     }
 
     private func sendErrorBar(_ error: String) -> some View {

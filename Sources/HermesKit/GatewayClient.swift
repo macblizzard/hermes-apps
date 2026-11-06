@@ -93,6 +93,14 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
     func configureModel(profile: String, model: String, provider: String, confirm: Bool) async throws -> ProfileModelChange
 
     // Compaction
+    /// Attach bytes to the session's next turn.
+    ///
+    /// Only the byte-carrying RPCs are used: `image.attach_bytes` queues an image and
+    /// `file.attach` stages a file and answers with an `@file:` reference that must be included in
+    /// the prompt. The bridge refuses the path-based variants outright.
+    func attach(session: SessionID, name: String, data: Data, isImage: Bool) async throws -> AttachmentReceipt
+
+    // Compaction
     /// `session.compress` — ask the host to summarise the session into a smaller context.
     ///
     /// `session_id` must be the **runtime** id (`GatewayClient` translates a stored id), and the
@@ -170,6 +178,13 @@ public extension GatewayClientProtocol {
         _ = (profile, model, provider, confirm)
         throw GatewayError.rpc(RPCError(code: -32601,
                                         message: "this client cannot configure a profile"))
+    }
+
+    /// Stubs never carry bytes anywhere.
+    func attach(session: SessionID, name: String, data: Data, isImage: Bool) async throws -> AttachmentReceipt {
+        _ = (session, name, data, isImage)
+        throw GatewayError.rpc(RPCError(code: -32601,
+                                        message: "this client cannot attach files"))
     }
 
     /// Conformers with no notion of a bot (previews, the unpaired stub, tests) keep the plain call.
@@ -330,6 +345,18 @@ public struct ModelOption: Identifiable, Hashable, Sendable {
         self.id = id
         self.provider = provider
         self.label = label
+    }
+}
+
+/// What the host answered after receiving bytes.
+///
+/// Images are queued for the next turn and need nothing further; a file yields an `@file:`
+/// reference that has to travel in the prompt, so the caller must not drop it.
+public struct AttachmentReceipt: Equatable, Sendable {
+    public let refText: String?
+
+    public init(refText: String?) {
+        self.refText = refText
     }
 }
 

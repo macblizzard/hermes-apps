@@ -169,6 +169,8 @@ public final class AppModel: ObservableObject {
     // MARK: Composer
 
     @Published public var draft: String = ""
+    /// Picked but not yet sent. Held locally so a cancelled composer leaves nothing on the host.
+    @Published public private(set) var pendingAttachments: [PendingAttachment] = []
     @Published public private(set) var sending = false
 
     /// Set when a send failed, so the UI can offer "retry" instead of losing the draft.
@@ -412,6 +414,28 @@ public final class AppModel: ObservableObject {
         sending = true
         lastSendError = nil
         draft = ""
+
+        // Attachments are uploaded *before* the turn so a failure cannot leave a phantom message
+        // in the transcript, and so a file's `@file:` reference can travel in the same prompt.
+        var refs: [String] = []
+        if !pendingAttachments.isEmpty {
+            do {
+                for attachment in pendingAttachments {
+                    let receipt = try await client.attach(session: sid, name: attachment.name,
+                                                          data: attachment.data,
+                                                          isImage: attachment.isImage)
+                    if let ref = receipt.refText { refs.append(ref) }
+                }
+                pendingAttachments = []
+            } catch {
+                sending = false
+                lastSendError = error.localizedDescription
+                draft = text
+                return // keep both the words and the attachments: nothing was sent
+            }
+        }
+        let outgoing = refs.isEmpty ? text : refs.joined(separator: "\n") + "\n\n" + text
+
         let optimisticID = UUID().uuidString
         // An interrupted turn leaves its cards live; they belong to that turn, above this message.
         flushLiveTools()
@@ -422,7 +446,7 @@ public final class AppModel: ObservableObject {
         isStreaming = true
         runningSessions.insert(sid)
         do {
-            try await client.submit(session: sid, text: text)
+            try await client.submit(session: sid, text: outgoing)
             // The first prompt is what persists a draft into a real row, so from now on this
             // session resumes like any other.
             draftSessionIDs.remove(sid)
@@ -435,6 +459,45 @@ public final class AppModel: ObservableObject {
             transcript.removeAll { $0.id == optimisticID }
         }
         sending = false
+    }
+
+    // MARK: Attachments
+
+    /// A picked attachment, held on the device until the user actually sends.
+    ///
+    /// Nothing is uploaded at pick time: a cancelled composer or a failed send must not leave an
+    /// image queued on the host for a turn that never happened.
+    public struct PendingAttachment: Identifiable, Equatable, Sendable {
+        public let id: UUID
+        public let name: String
+        public let isImage: Bool
+        public let data: Data
+
+        public init(id: UUID = UUID(), name: String, isImage: Bool, data: Data) {
+            self.id = id
+            self.name = name
+            self.isImage = isImage
+            self.data = data
+        }
+    }
+
+    /// The host's byte limit for one attachment (`AttachmentPayload.maximumBytes` on the bridge).
+    public static let maxAttachmentBytes = 512 * 1024
+
+    public func addPendingAttachment(name: String, data: Data, isImage: Bool) {
+        guard !data.isEmpty else {
+            lastSendError = "That attachment is empty."
+            return
+        }
+        guard data.count <= Self.maxAttachmentBytes else {
+            lastSendError = "That attachment is larger than the 512 KiB limit."
+            return
+        }
+        pendingAttachments.append(PendingAttachment(name: name, isImage: isImage, data: data))
+    }
+
+    public func removePendingAttachment(_ id: UUID) {
+        pendingAttachments.removeAll { $0.id == id }
     }
 
     public func interrupt() async {

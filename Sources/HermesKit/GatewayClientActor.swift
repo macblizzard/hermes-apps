@@ -424,6 +424,40 @@ public actor GatewayClient: GatewayClientProtocol {
                         provider: applied?["provider"]?.stringValue ?? provider)
     }
 
+    // MARK: Attachments
+
+    /// The bridge's decoded-byte ceiling; refused here as well so the user sees the limit instead of
+    /// a rejected frame.
+    private static let maxAttachmentBytes = 512 * 1024
+
+    public func attach(session: SessionID, name: String, data: Data,
+                       isImage: Bool) async throws -> AttachmentReceipt {
+        guard !data.isEmpty, data.count <= Self.maxAttachmentBytes else {
+            throw GatewayError.rpc(RPCError(code: -32000,
+                                            message: "attachment must be 1 byte to 512 KiB"))
+        }
+        guard !name.isEmpty, name != ".", name != "..", name.utf8.count <= 255,
+              name.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\\0\n\r")) == nil else {
+            throw GatewayError.rpc(RPCError(code: -32000, message: "invalid attachment name"))
+        }
+        let encoded = data.base64EncodedString()
+        let method = isImage ? "image.attach_bytes" : "file.attach"
+        var params: [String: JSONValue] = ["session_id": .string(addressableID(session))]
+        if isImage {
+            params["filename"] = .string(name)
+            params["content_base64"] = .string(encoded)
+        } else {
+            params["name"] = .string(name)
+            params["data_url"] = .string("data:application/octet-stream;base64," + encoded)
+        }
+        let result = try await perform(method, params: .object(params), timeout: timeouts.sessionResume)
+        guard result?["attached"]?.boolValue == true else {
+            throw GatewayError.malformedResponse(method: method)
+        }
+        // Images are queued by the host; only a staged file produces a reference the prompt needs.
+        return AttachmentReceipt(refText: isImage ? nil : result?["ref_text"]?.stringValue)
+    }
+
     // MARK: Compaction
 
     /// `session.compress` with the **runtime** id.
