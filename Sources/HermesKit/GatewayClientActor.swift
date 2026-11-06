@@ -332,6 +332,13 @@ public actor GatewayClient: GatewayClientProtocol {
         return try await sessionPointer.storedSessionID(for: profile)
     }
 
+    /// The bridge's read of every bot's newest message. No pointer store means no bridge to ask,
+    /// which is the empty answer the caller falls back from.
+    public func botPreviews() async throws -> [String: BotConversationPreview] {
+        guard let sessionPointer else { return [:] }
+        return try await sessionPointer.previews()
+    }
+
     /// Fire-and-forget by nature, but `throws` so the caller can log that the other device will
     /// keep its own pointer. Never retried here: an unreachable bridge is the caller's problem to
     /// ignore, not something to queue behind a conversation that already opened.

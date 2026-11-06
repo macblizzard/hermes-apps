@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from .audit import AuditLog
 from .bot_icons import create_bot_icons_router
+from .bot_previews import create_bot_previews_router
 from .bot_sessions import create_bot_sessions_router
 from .config import BridgeConfig, is_loopback_host
 from .device_auth import require_device
@@ -145,6 +146,7 @@ def create_app(
     app = FastAPI(title="hermes-bridge", version="0.2.0", lifespan=lifespan)
     app.state.bridge = runtime
     app.include_router(create_bot_icons_router(runtime))
+    app.include_router(create_bot_previews_router(runtime))
     app.include_router(create_bot_sessions_router(runtime))
     # Keys are read from the bridge EnvironmentFile at construction, never from a
     # request; tests pass a backend with an injected transport.

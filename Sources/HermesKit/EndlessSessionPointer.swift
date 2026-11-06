@@ -15,6 +15,24 @@ import FoundationNetworking
 /// Deliberately tiny and transport-shaped: the decision of *what to do* with the answer lives in
 /// `EndlessSessionPolicy`, and the HTTP leg in `BridgeBotSessionPointer`, so both are testable
 /// without a socket and without a device.
+/// The newest message of a bot's conversation, as the bridge reads it off the host.
+///
+/// The gateway's own `session.list` preview is the *first* user message of a session (a title
+/// stand-in), so a bot row built from it repeats what was asked days ago. This is the other end of
+/// the conversation, whatever role it came from.
+public struct BotConversationPreview: Hashable, Sendable {
+    public let text: String
+    /// `user` or `assistant`; the host stores nothing else for a message a list row should show.
+    public let role: String
+    public let timestamp: Double?
+
+    public init(text: String, role: String, timestamp: Double? = nil) {
+        self.text = text
+        self.role = role
+        self.timestamp = timestamp
+    }
+}
+
 public protocol BotSessionPointerStore: Sendable {
     /// `GET /v1/bots/{profile}/session` — the shared stored session id, or `nil` when the bridge
     /// has none for this bot yet (unset, or a route the deployed bridge does not serve).
@@ -23,6 +41,16 @@ public protocol BotSessionPointerStore: Sendable {
     /// `PUT /v1/bots/{profile}/session` — publish `storedSessionID` so the other device adopts it.
     /// `nil` clears the pointer, which is what a reset means.
     func publish(storedSessionID: String?, for profile: String) async throws
+
+    /// `GET /v1/bots/previews` — every bot's newest message, keyed by profile.
+    ///
+    /// Defaulted to empty so a pointer store that predates the route (or a test double) simply
+    /// means "no previews from here", which sends the caller to the gateway's coarse fallback.
+    func previews() async throws -> [String: BotConversationPreview]
+}
+
+extension BotSessionPointerStore {
+    public func previews() async throws -> [String: BotConversationPreview] { [:] }
 }
 
 /// The real pointer: one HTTP request, one freshly minted single-use ticket.
@@ -118,6 +146,47 @@ public struct BridgeBotSessionPointer: BotSessionPointerStore {
         guard (200..<300).contains(http.statusCode) else {
             throw Failure.rejected(status: http.statusCode, detail: Self.detail(from: data))
         }
+    }
+
+    /// `GET /v1/bots/previews` — one request for every bot's newest message.
+    ///
+    /// One call, not one per bot: the bridge reads each profile's message table directly, so the
+    /// round trip is the only cost. A bridge without the route, or a body this client cannot read,
+    /// answers empty rather than throwing — the bot list keeps its two lines instead of showing a
+    /// failure over a decoration.
+    public func previews() async throws -> [String: BotConversationPreview] {
+        let endpoint = try await endpoint()
+        let url = endpoint.baseURL
+            .appendingPathComponent("v1")
+            .appendingPathComponent("bots")
+            .appendingPathComponent("previews")
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 8
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(endpoint.ticket)", forHTTPHeaderField: "Authorization")
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw Failure.notHTTP }
+        if http.statusCode == 404 || http.statusCode == 204 { return [:] }
+        guard (200..<300).contains(http.statusCode) else {
+            throw Failure.rejected(status: http.statusCode, detail: Self.detail(from: data))
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = object["previews"] as? [String: Any]
+        else { return [:] }
+
+        var previews: [String: BotConversationPreview] = [:]
+        for (profile, value) in rows {
+            guard let row = value as? [String: Any],
+                  let text = (row["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty
+            else { continue }
+            previews[profile] = BotConversationPreview(text: text,
+                                                       role: (row["role"] as? String) ?? "assistant",
+                                                       timestamp: row["at"] as? Double)
+        }
+        return previews
     }
 
     // MARK: Plumbing

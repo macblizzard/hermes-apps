@@ -270,6 +270,10 @@ public final class AppModel: ObservableObject {
             if selectedBotID == nil || !loaded.contains(where: { $0.id == selectedBotID }) {
                 selectedBotID = Self.defaultBot(in: loaded, hostName: hostName)?.id
             }
+            // The bot list's third line belongs to the list, so it is loaded with the list: a
+            // caller that only knows about `loadBots` (connect, a pull-to-refresh) still gets it,
+            // which is exactly what the desktop app was missing.
+            await loadBotPreviews()
         } catch {
             botsError = error.localizedDescription
         }
@@ -312,7 +316,25 @@ public final class AppModel: ObservableObject {
     /// trips deep before the list stops being two lines per row, and a cold profile can take
     /// seconds to answer its first `session.list`.
     public func loadBotPreviews(force: Bool = false) async {
-        let wanted = bots.map(\.id).filter { force || botPreviews[$0] == nil }
+        let ids = bots.map(\.id)
+        guard !ids.isEmpty else { return }
+
+        // First source: the bridge, which reads the host's own message table and answers every
+        // bot in one request. It is the *newest* message whatever role wrote it — the gateway's
+        // `session.list` preview is the first **user** message of the session (a title stand-in),
+        // which is why a row built from it repeated the opening request for days.
+        var covered: Set<String> = []
+        if let fromBridge = try? await client.botPreviews(), !fromBridge.isEmpty {
+            for (bot, preview) in fromBridge where ids.contains(bot) {
+                covered.insert(bot)
+                if let line = Self.previewLine(preview.text) { botPreviews[bot] = line }
+            }
+        }
+
+        // Second source, for the bots the bridge did not cover (an older bridge, or a profile with
+        // no conversation row yet): the gateway's coarse preview, which is still better than an
+        // empty third line.
+        let wanted = ids.filter { !covered.contains($0) && (force || botPreviews[$0] == nil) }
         guard !wanted.isEmpty else { return }
         let client = self.client
         let batch = 4

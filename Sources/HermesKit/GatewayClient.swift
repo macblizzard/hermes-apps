@@ -72,6 +72,11 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
                        idempotencyKey: String?) async throws -> SessionID
     func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry]
 
+    /// Every bot's newest message, keyed by profile — read by the bridge off the host's own message
+    /// table. A client with no bridge pointer answers `[:]`, which sends the caller to the
+    /// gateway's coarser `session.list` preview.
+    func botPreviews() async throws -> [String: BotConversationPreview]
+
     // Shared conversation pointer
     /// Which stored session is **this bot's** conversation, as the bridge holds it.
     ///
@@ -142,6 +147,13 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
     /// Answer a request the gateway sent us (approval, clarify, sudo, secret…).
     func answer(_ request: ServerRequestID, with result: JSONValue) async throws
     func decline(_ request: ServerRequestID, with error: RPCError) async throws
+}
+
+extension GatewayClientProtocol {
+    /// No bridge, no previews. Declared as a default (not just a concrete method) so every client
+    /// that has no bridge credentials — the unpaired one, the fixture, a preview — is a valid
+    /// conformer while `client.botPreviews()` still dispatches dynamically for the real one.
+    public func botPreviews() async throws -> [String: BotConversationPreview] { [:] }
 }
 
 public typealias SessionID = String
