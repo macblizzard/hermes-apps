@@ -19,6 +19,8 @@ struct BotListScreen: View {
     @EnvironmentObject private var app: AppEnvironment
 
     @State private var query = ""
+    /// Hidden bots are a view preference; this reveals them so nothing becomes unreachable.
+    @State private var showHidden = false
     @State private var iconBot: Bot?
     /// Long-press → Bot Settings. Presented from this screen so the settings flow needs no
     /// plumbing from the tab, and so a long-press can never accidentally open the chat.
@@ -47,14 +49,17 @@ struct BotListScreen: View {
         lastOpenedBotsJSON = json
     }
 
+    private var hiddenBots: [Bot] {
+        model.bots.filter { model.isHidden($0.id) }
+    }
+
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var filtered: [Bot] {
-        let ordered = BotActivityOrder.order(model.bots,
-                                             activity: model.botActivity,
-                                             pinned: model.pinnedBots)
+        // Pinned first, then by last message; hidden bots are excluded by the model's ordering.
+        let ordered = model.orderedBots
         guard !trimmedQuery.isEmpty else { return ordered }
         return ordered.filter { bot in
             bot.displayName.localizedCaseInsensitiveContains(trimmedQuery)
@@ -75,12 +80,28 @@ struct BotListScreen: View {
                 ForEach(filtered) { bot in
                     row(for: bot)
                 }
+
+                if showHidden, !hiddenBots.isEmpty {
+                    Section("Hidden") {
+                        ForEach(hiddenBots) { bot in
+                            Button {
+                                model.toggleHidden(bot.id)
+                            } label: {
+                                HStack {
+                                    Text(bot.displayName).foregroundStyle(Tokens.textPrimary)
+                                    Spacer()
+                                    Text("Show").foregroundStyle(Tokens.accentText)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Tokens.canvas)
-        .navigationTitle("Bots")
+        .navigationTitle("Hermes Bots")
         .searchable(text: $query,
                     placement: .navigationBarDrawer(displayMode: .always),
                     prompt: "Search bots")
@@ -178,15 +199,19 @@ struct BotListScreen: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button {
-                model.togglePin(botID: bot.id)
-            } label: {
-                model.isPinned(botID: bot.id)
-                    ? Label("Unpin", systemImage: "pin.slash")
-                    : Label("Pin", systemImage: "pin")
-            }
             Button { iconBot = bot } label: { Label("Bot icon", systemImage: "person.crop.circle") }
             Button { settingsBot = bot } label: { Label("Bot Settings", systemImage: "gearshape") }
+            Button {
+                model.togglePin(bot.id)
+            } label: {
+                Label(model.isPinned(bot.id) ? "Unpin" : "Pin to top",
+                      systemImage: model.isPinned(bot.id) ? "pin.slash" : "pin")
+            }
+            Button(role: .destructive) {
+                model.toggleHidden(bot.id)
+            } label: {
+                Label("Hide bot", systemImage: "eye.slash")
+            }
         }
         .listRowBackground(Tokens.canvas)
         .listRowSeparator(.hidden)
@@ -361,6 +386,15 @@ struct BotListScreen: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        if app.isPaired {
+            ToolbarItem(placement: .topBarLeading) {
+                Menu {
+                    Toggle("Show hidden bots", isOn: $showHidden)
+                } label: {
+                    Image(systemName: "line.3.horizontal.decrease.circle")
+                }
+            }
+        }
         if !app.isPaired {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {

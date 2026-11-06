@@ -171,6 +171,8 @@ public final class AppModel: ObservableObject {
     /// Last message exchanged per bot, so the list can order by real activity rather than by
     /// whichever chat was merely opened. Persisted per host: it is a UI fact, not host state.
     @Published public private(set) var botActivity: [String: Date] = [:]
+    /// Hidden bots disappear from the list without touching the host: this is a view preference.
+    @Published public private(set) var hiddenBots: Set<String> = []
 
     /// Bots the user pinned to the top of the list on this host. Like activity this is a UI
     /// preference, not host state, so it is persisted per host in UserDefaults. Several pins keep
@@ -216,6 +218,7 @@ public final class AppModel: ObservableObject {
             connection = .connected
             await observeEvents()
             loadBotActivity()
+            loadHiddenBots()
             loadPinnedBots()
             await loadBots()
             await loadModelLabel()
@@ -579,6 +582,7 @@ public final class AppModel: ObservableObject {
             resetForBotSwitch()
             selectedBotID = botID
         }
+        await loadModelLabel()
         let key = Self.endlessKey(botID)
         if let stored = Self.defaults.string(forKey: key), !stored.isEmpty {
             do {
@@ -690,7 +694,10 @@ public final class AppModel: ObservableObject {
     /// Silent on failure: no chip is honest, a wrong model name is the bug this replaced.
     private func loadModelLabel() async {
         do {
-            modelLabel = try await client.modelCatalog().current?.label
+            // Scoped to the open bot: an unscoped catalogue answers for whichever profile the
+            // gateway defaults to, which is why the chip kept saying deepseek after a bot's own
+            // default had been changed to something else.
+            modelLabel = try await client.modelCatalog(profile: selectedBotID).current?.label
         } catch {
             modelLabel = nil
         }
@@ -699,6 +706,25 @@ public final class AppModel: ObservableObject {
     // MARK: Bot activity
 
     /// A message — either direction — is the only thing that reorders the bot list.
+    public func toggleHidden(_ botID: String) {
+        guard !botID.isEmpty else { return }
+        if hiddenBots.contains(botID) { hiddenBots.remove(botID) } else { hiddenBots.insert(botID) }
+        Self.defaults.set(Array(hiddenBots), forKey: hiddenKey)
+    }
+
+    public func isHidden(_ botID: String) -> Bool { hiddenBots.contains(botID) }
+
+    /// The bots this device chooses to show: pinned first, then by last message.
+    public var orderedBots: [Bot] {
+        BotOrdering.order(bots, activity: botActivity, pinned: pinnedBots, hidden: hiddenBots)
+    }
+
+    private var hiddenKey: String { "hermes.hiddenBots.\(hostName)" }
+
+    private func loadHiddenBots() {
+        hiddenBots = Set(Self.defaults.stringArray(forKey: hiddenKey) ?? [])
+    }
+
     public func recordActivity(for botID: String, at date: Date = Date()) {
         guard !botID.isEmpty else { return }
         if let existing = botActivity[botID], existing >= date { return }
