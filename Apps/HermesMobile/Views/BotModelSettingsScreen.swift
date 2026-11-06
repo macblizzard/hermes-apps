@@ -11,6 +11,11 @@ struct BotModelSettingsScreen: View {
 
     let bot: Bot
     let load: (String) async throws -> ModelCatalog
+    /// True when this bot's conversation is the one currently open. A live conversation keeps the
+    /// model it was created with — the gateway pins it per session and offers no way to change it —
+    /// so the only way to apply a new default to it is to start it over.
+    var conversationIsOpen: Bool = false
+    var resetConversation: (() async -> Void)? = nil
     let save: (String, ModelOption, Bool) async throws -> SaveResult
 
     @Environment(\.dismiss) private var dismiss
@@ -52,7 +57,16 @@ struct BotModelSettingsScreen: View {
                     } header: {
                         Text("Models")
                     } footer: {
-                        Text("Changes this bot's profile default. An existing conversation may keep a session-specific model override.")
+                        Text(conversationIsOpen
+                             ? "This becomes the bot's default. The conversation you have open keeps the model it started with — reset it to use the new one."
+                             : "This becomes the bot's default for new conversations with this bot.")
+                    }
+                    if conversationIsOpen, let resetConversation {
+                        Section {
+                            Button("Reset this conversation to use it") {
+                                Task { await resetConversation(); dismiss() }
+                            }
+                        }
                     }
                 } else if error == nil {
                     ProgressView("Loading models…")
