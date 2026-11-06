@@ -33,10 +33,33 @@ struct MacComposerBar: View {
     }
 
     private var hint: String {
+        // The recording state is the one thing the composer itself cannot know: it changes what
+        // the microphone glyph means, so it is said in the hint line above the field.
+        if voice.isRecording { return "recording · tap the square to transcribe" }
+        if voice.state == .requestingPermission { return "waiting for microphone permission…" }
+        if voice.state == .transcribing { return "transcribing…" }
         if model.isStreaming {
             return "streaming · ⌘. interrupt · ⇧⏎ newline"
         }
         return "⏎ or ⌘↩ send · ⇧⏎ newline · ⌘K commands"
+    }
+
+    /// The microphone's glyph and tint, from the controller's own state.
+    private var micGlyph: String {
+        switch voice.state {
+        case .recording: return "stop.circle.fill"
+        case .requestingPermission, .transcribing: return "waveform"
+        case .idle: return "mic"
+        }
+    }
+
+    private var micLabel: String {
+        switch voice.state {
+        case .recording: return "Stop and transcribe"
+        case .requestingPermission: return "Waiting for microphone permission"
+        case .transcribing: return "Transcribing"
+        case .idle: return "Record a voice message"
+        }
     }
 
     /// The bar's height with one line in it, and nothing else showing.
@@ -69,23 +92,21 @@ struct MacComposerBar: View {
                 pendingAttachmentsBar
             }
 
-            if store.isPaired {
-                MacVoiceRow(controller: voice, isEnabled: canRecordVoice)
-                    .frame(maxWidth: Geometry.conversationMeasure)
-                    .frame(maxWidth: .infinity)
-            }
-
             Composer(text: $model.draft,
                      placeholder: store.isPaired
                         ? "Ask \(store.selectedBot?.displayName ?? model.hostName) anything"
                         : "Pair a host to start a conversation",
                      isSending: model.isStreaming,
                      isDisabled: model.selectedSessionID == nil,
+                     // Inside the card, immediately left of the send arrow.
+                     showsMic: store.isPaired,
+                     micSystemImage: micGlyph,
+                     micTint: voice.isRecording ? Tokens.danger : nil,
+                     micAccessibilityLabel: micLabel,
+                     isMicEnabled: canRecordVoice && !voice.isBusy,
                      hint: hint,
                      onSend: { store.send() },
                      onAttach: { showsAttachmentMenu = true },
-                     // `Composer` keeps the hook but draws no microphone glyph, so the visible
-                     // control is `MacVoiceRow` above; both call the same toggle.
                      onMic: { toggleVoice() },
                      onInterrupt: interrupt,
                      // Anchored on the paperclip, not on the card: the menu used to drop from
@@ -190,86 +211,6 @@ struct MacComposerBar: View {
             .padding(.horizontal, Geometry.readingInset)
             .padding(.top, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-// MARK: - Voice control
-
-/// The composer's microphone: tap to record, tap again to transcribe.
-///
-/// `Composer` (OpenBotUI) keeps an `onMic` hook but draws no microphone glyph, so the control
-/// lives here, on the quiet line above the field — the phone's layout at desktop density. The
-/// transcript is appended to the draft and never sent: misrecognition is common enough that the
-/// words should be read before they leave the Mac.
-private struct MacVoiceRow: View {
-    @ObservedObject var controller: MacVoiceController
-    /// False while there is no session to dictate into, or the pairing cannot mint a ticket.
-    var isEnabled: Bool
-
-    private var canTap: Bool { isEnabled && !controller.isBusy }
-
-    private var symbol: String {
-        switch controller.state {
-        case .recording: return "stop.circle.fill"
-        case .requestingPermission, .transcribing: return "waveform"
-        case .idle: return "mic"
-        }
-    }
-
-    private var accessibilityText: String {
-        switch controller.state {
-        case .recording: return "Stop and transcribe"
-        case .requestingPermission: return "Waiting for microphone permission"
-        case .transcribing: return "Transcribing"
-        case .idle: return "Record a voice message"
-        }
-    }
-
-    private var status: String? {
-        switch controller.state {
-        case .requestingPermission: return "microphone permission…"
-        case .recording: return "recording · tap the square to transcribe"
-        case .transcribing: return "transcribing…"
-        case .idle: return nil
-        }
-    }
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Button(action: tap) {
-                Image(systemName: symbol)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(controller.isRecording ? Tokens.danger : Tokens.textSecondary)
-                    .frame(width: 22, height: 18)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!canTap)
-            .help(accessibilityText)
-            .accessibilityLabel(accessibilityText)
-            .accessibilityIdentifier("composer.mic")
-
-            if let line = status {
-                Text(line)
-                    .font(TypeScale.font(TypeScale.caption))
-                    .foregroundStyle(controller.isRecording ? Tokens.danger : Tokens.textDim)
-                    .lineLimit(1)
-                    .accessibilityHidden(true)
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, Geometry.readingInset)
-        .padding(.bottom, 2)
-        .opacity(isEnabled ? 1 : 0.55)
-    }
-
-    private func tap() {
-        if controller.isRecording {
-            controller.stopAndTranscribe()
-        } else {
-            controller.startRecording()
         }
     }
 }

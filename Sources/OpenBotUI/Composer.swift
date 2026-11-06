@@ -34,6 +34,14 @@ public struct Composer: View {
     private let attachPopoverPresented: Binding<Bool>?
     private let attachPopoverContent: AnyView?
 
+    /// The microphone's own presentation, supplied by the caller because only the recording
+    /// controller knows whether it is idle, listening or transcribing. It is drawn immediately
+    /// left of the send arrow — the phone's order — instead of on a separate line above the card.
+    private let micSystemImage: String
+    private let micTint: Color?
+    private let micAccessibilityLabel: String
+    private let isMicEnabled: Bool
+
     @FocusState private var focused: Bool
 
     #if os(macOS)
@@ -52,6 +60,10 @@ public struct Composer: View {
                 hasAttachments: Bool = false,
                 showsAttach: Bool = true,
                 showsMic: Bool = true,
+                micSystemImage: String = "mic",
+                micTint: Color? = nil,
+                micAccessibilityLabel: String = "Record a voice message",
+                isMicEnabled: Bool = true,
                 hint: String? = Composer.defaultHint,
                 onSend: @escaping () -> Void,
                 onAttach: (() -> Void)? = nil,
@@ -67,6 +79,10 @@ public struct Composer: View {
         self.hasAttachments = hasAttachments
         self.showsAttach = showsAttach
         self.showsMic = showsMic
+        self.micSystemImage = micSystemImage
+        self.micTint = micTint
+        self.micAccessibilityLabel = micAccessibilityLabel
+        self.isMicEnabled = isMicEnabled
         self.hint = hint
         self.onSend = onSend
         self.onAttach = onAttach
@@ -115,6 +131,12 @@ public struct Composer: View {
 
                 field
                     .frame(minHeight: controlSide - 4)
+
+                // The microphone belongs beside the send arrow: one row of controls, and the
+                // control that ends a message next to the one that starts it.
+                if showsMic {
+                    micControl
+                }
 
                 if isSending, let onInterrupt {
                     interruptButton(onInterrupt)
@@ -225,6 +247,32 @@ public struct Composer: View {
             button.popover(isPresented: presented, arrowEdge: .top) { content }
         } else {
             button
+        }
+    }
+
+    /// The microphone. Drawn only when the caller supplied an action, so the phone's composer
+    /// (which has its own voice affordances) is unchanged.
+    @ViewBuilder
+    private var micControl: some View {
+        if let onMic {
+            Button {
+                Haptics.selection()
+                onMic()
+            } label: {
+                Image(systemName: micSystemImage)
+                    .font(.system(size: glyphSize, weight: .semibold))
+                    .foregroundStyle(micTint ?? Tokens.textSecondary)
+                    .frame(width: controlSide, height: controlSide)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(PressableButtonStyle())
+            .disabled(isDisabled || !isMicEnabled)
+            .opacity(isMicEnabled ? 1 : 0.5)
+            #if os(macOS)
+            .help(micAccessibilityLabel)
+            #endif
+            .accessibilityLabel(micAccessibilityLabel)
+            .accessibilityIdentifier("composer.mic")
         }
     }
 
