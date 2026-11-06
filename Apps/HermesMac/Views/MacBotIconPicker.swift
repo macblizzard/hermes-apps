@@ -68,11 +68,16 @@ struct MacBotIconPicker: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text("Bot icon for \(bot.displayName)").font(.headline)
+                Text("Bot icon for \(bot.displayName)")
+                    .font(TypeScale.font(Tokens.textLG, weight: .semibold))
+                    .foregroundStyle(Tokens.textPrimary)
                 Spacer()
-                Button("Cancel") { dismiss() }.disabled(saving)
+                OpenBotButton("Cancel", kind: .secondary, size: .small) { dismiss() }
+                    .disabled(saving)
             }
-            Text("Your paired devices share this choice.").foregroundStyle(.secondary)
+            Text("Your paired devices share this choice.")
+                .font(TypeScale.font(Tokens.textSM))
+                .foregroundStyle(Tokens.textMuted)
             ScrollView {
                 BotIconGallery(selected: store.botIcons[bot.id]) { icon in
                     guard !saving else { return }
@@ -90,9 +95,16 @@ struct MacBotIconPicker: View {
                 }.disabled(saving)
             }
             if saving { ProgressView("Saving…") }
-            if let error { Text(error).foregroundStyle(.red) }
+            if let error {
+                Text(error)
+                    .font(TypeScale.font(TypeScale.caption))
+                    .foregroundStyle(Tokens.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(20)
         .frame(width: 500, height: 420)
+        .background(Tokens.canvas)
+        .preferredColorScheme(.dark)
     }
 }

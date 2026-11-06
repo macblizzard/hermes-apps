@@ -20,7 +20,16 @@ struct HermesMacApp: App {
     var body: some Scene {
         WindowGroup("Hermes") {
             WorkspaceRoot(store: store)
-                .frame(minWidth: WorkspaceStore.sidebarFloor + Geometry.conversationMin,
+                // The shell lays out exactly this much chrome around the conversation: the 8 pt
+                // window surround on each side, the bot panel at its floor, the divider strip and
+                // its hairline. Leaving any of it out is what clipped the conversation's right
+                // edge at 624 pt.
+                .frame(minWidth: 8
+                                + WorkspaceStore.sidebarFloor
+                                + Geometry.paneDivider
+                                + 1
+                                + Geometry.conversationMin
+                                + 8,
                        minHeight: 560)
                 .preferredColorScheme(.dark)
                 // No-op unless the fixture launch argument was given: the real window connects

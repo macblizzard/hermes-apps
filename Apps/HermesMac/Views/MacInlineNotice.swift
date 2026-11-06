@@ -34,7 +34,7 @@ struct MacInlineNotice: View {
                 TextButton(actionTitle, tone: Tokens.accentText, action: action)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, Geometry.readingInset)
         .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(soft)

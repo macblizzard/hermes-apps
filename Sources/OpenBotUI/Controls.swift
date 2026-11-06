@@ -217,7 +217,8 @@ public struct TextButton: View {
             Text(title)
                 .font(TypeScale.font(TypeScale.label, weight: .semibold))
                 .foregroundStyle(isDisabled ? Tokens.textDim : tone)
-                .padding(.vertical, 4)
+                // 6 pt above and below an 11 pt line clears the 24 pt minimum hit target.
+                .padding(.vertical, 6)
                 .padding(.horizontal, 2)
                 .contentShape(Rectangle())
         }

@@ -79,10 +79,12 @@ struct MacComposerBar: View {
                      // control is `MacVoiceRow` above; both call the same toggle.
                      onMic: { toggleVoice() },
                      onInterrupt: interrupt)
-                .padding(.horizontal, 24)
+                // Measured, then inset. Padding first shrank the field to 592 pt and put its left
+                // edge 24 pt inside every other column's.
+                .frame(maxWidth: Geometry.conversationMeasure)
+                .padding(.horizontal, Geometry.readingInset)
                 .padding(.top, 10)
                 .padding(.bottom, 14)
-                .frame(maxWidth: Geometry.conversationMeasure)
                 .frame(maxWidth: .infinity)
                 // Anchored under the bar, where the paperclip that opened it sits.
                 .popover(isPresented: $showsAttachmentMenu, arrowEdge: .bottom) {
@@ -164,7 +166,7 @@ struct MacComposerBar: View {
                     .background(Capsule().fill(Tokens.surface))
                 }
             }
-            .padding(.horizontal, 24)
+            .padding(.horizontal, Geometry.readingInset)
             .padding(.top, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -237,7 +239,7 @@ private struct MacVoiceRow: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 34)
+        .padding(.horizontal, Geometry.readingInset)
         .padding(.bottom, 2)
         .opacity(isEnabled ? 1 : 0.55)
     }

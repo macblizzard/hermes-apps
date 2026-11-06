@@ -62,9 +62,9 @@ final class HermesMacConversationUITests: XCTestCase {
     func testInChatSearchReportsAndNarrowsTheMatchCount() {
         launchFixture()
 
-        let toggle = app.buttons.matching(identifier: "conversationSearchToggle").firstMatch
-        XCTAssertTrue(toggle.waitForExistence(timeout: 20), "the in-chat search affordance is missing")
-        toggle.click()
+        // The search bar is keyboard-only chrome now (the audit removed a permanently visible
+        // row), so open it the way a user does: ⌘F.
+        app.typeKey("f", modifierFlags: .command)
 
         let field = identifier("conversationSearchField")
         XCTAssertTrue(field.waitForExistence(timeout: 10), "the conversation search field did not open")

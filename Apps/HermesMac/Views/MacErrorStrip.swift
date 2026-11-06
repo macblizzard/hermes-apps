@@ -35,7 +35,7 @@ struct MacErrorStrip: View {
                 onDismiss()
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, Geometry.readingInset)
         .padding(.vertical, 7)
         .background(Tokens.dangerSoft)
         .overlay(alignment: .top) { Hairline(color: Tokens.borderStrong) }

@@ -13,6 +13,12 @@ struct HostStatusBar: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
 
+    /// The chip's own width. Below the inline floor the two or three verbs cannot fit on one
+    /// line at the 200 pt panel floor, so they fold into one overflow menu instead of
+    /// truncating to initials.
+    @State private var chipWidth: CGFloat = 0
+    private static let inlineActionFloor: CGFloat = 240
+
     private var hostName: String {
         store.pairing?.displayHost ?? model.hostName
     }
@@ -29,7 +35,7 @@ struct HostStatusBar: View {
                         .lineLimit(1)
 
                     Text(model.connection.detail)
-                        .font(TypeScale.font(10))
+                        .font(TypeScale.font(TypeScale.caption))
                         .foregroundStyle(model.connection.isLive ? Tokens.textMuted : Tokens.textDim)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -45,14 +51,14 @@ struct HostStatusBar: View {
             if model.connection.isLive {
                 HStack(spacing: 6) {
                     Text(latencyText)
-                        .font(.system(size: 10, design: .monospaced))
+                        .font(Tokens.mono)
                         .foregroundStyle(Tokens.textDim)
 
                     Spacer(minLength: 0)
 
                     if model.hasPendingRequests {
                         Text("\(model.pendingRequests.count) waiting")
-                            .font(TypeScale.font(10, weight: .medium))
+                            .font(TypeScale.font(TypeScale.caption, weight: .medium))
                             .foregroundStyle(Tokens.warning)
                     }
                 }
@@ -60,16 +66,24 @@ struct HostStatusBar: View {
 
             action
         }
-        .padding(9)
+        .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Tokens.radiusCard, style: .continuous)
                 .fill(Tokens.control)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: Tokens.radiusCard, style: .continuous)
                 .strokeBorder(Tokens.borderStrong, lineWidth: 1)
         )
-        .padding(.horizontal, 8)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: ChipWidthKey.self, value: proxy.size.width)
+            }
+        )
+        .onPreferenceChange(ChipWidthKey.self) { width in
+            if width != chipWidth { chipWidth = width }
+        }
+        .padding(.horizontal, Geometry.sidebarInset)
         .padding(.top, 6)
         .padding(.bottom, 8)
     }
@@ -89,6 +103,49 @@ struct HostStatusBar: View {
 
     @ViewBuilder
     private var action: some View {
+        if chipWidth > 0, chipWidth < Self.inlineActionFloor {
+            overflowAction
+        } else {
+            inlineAction
+        }
+    }
+
+    /// One menu holding whichever verbs the current state offers, for the narrow panel.
+    private var overflowAction: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+
+            Menu {
+                if !store.isPaired {
+                    Button("Pair host…") { store.isPairSheetPresented = true }
+                } else if model.connection.isLive {
+                    Button("Reconnect") { Task { await store.reconnect() } }
+                    Button("Disconnect") { Task { await store.disconnect() } }
+                    Divider()
+                    Button("Pair another host…") { store.isPairSheetPresented = true }
+                } else {
+                    Button("Connect") { Task { await store.connect() } }
+                        .disabled(model.connection == .connecting)
+                    Divider()
+                    Button("Pair host…") { store.isPairSheetPresented = true }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(TypeScale.font(TypeScale.label))
+                    .foregroundStyle(Tokens.textSecondary)
+                    .frame(minWidth: 24, minHeight: 24)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Connection actions")
+            .accessibilityLabel("Connection actions")
+        }
+    }
+
+    @ViewBuilder
+    private var inlineAction: some View {
         if !store.isPaired {
             OpenBotButton("Pair host",
                           systemImage: "link",
@@ -122,6 +179,14 @@ struct HostStatusBar: View {
                 }
             }
         }
+    }
+}
+
+/// The chip's measured width, for the inline/overflow decision.
+private struct ChipWidthKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 

@@ -110,10 +110,22 @@ private struct ChatSettingsTab: View {
             Spacer(minLength: 8)
 
             TextField("Off", text: $thresholdText)
-                .textFieldStyle(.roundedBorder)
+                .textFieldStyle(.plain)
                 .multilineTextAlignment(.trailing)
-                .font(.system(size: 13, design: .monospaced))
+                .font(Tokens.mono)
+                .foregroundStyle(Tokens.textPrimary)
+                .tint(Tokens.accent)
                 .monospacedDigit()
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous)
+                        .fill(Tokens.control)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous)
+                        .strokeBorder(Tokens.borderStrong, lineWidth: 1)
+                )
                 .frame(width: 116)
                 .focused($thresholdFocused)
                 .onSubmit { commitThreshold() }
@@ -123,13 +135,12 @@ private struct ChatSettingsTab: View {
                 .foregroundStyle(Tokens.textMuted)
 
             if threshold > 0 {
-                Button("Turn off") { setThreshold(0) }
-                    .buttonStyle(.link)
+                TextButton("Turn off", tone: Tokens.accentText) { setThreshold(0) }
             } else {
-                Button("Use \(Self.short(AppModel.defaultAutoCompactTokens))") {
+                TextButton("Use \(Self.short(AppModel.defaultAutoCompactTokens))",
+                           tone: Tokens.accentText) {
                     setThreshold(AppModel.defaultAutoCompactTokens)
                 }
-                .buttonStyle(.link)
             }
         }
         .font(TypeScale.font(Tokens.textMD))
@@ -254,8 +265,7 @@ private struct BotsSettingsTab: View {
             Spacer(minLength: 8)
 
             if model.isHidden(botID: bot.id) {
-                Button("Show") { model.toggleHidden(botID: bot.id) }
-                    .buttonStyle(.link)
+                TextButton("Show", tone: Tokens.accentText) { model.toggleHidden(botID: bot.id) }
             } else {
                 Toggle("Pinned", isOn: Binding(
                     get: { model.isPinned(botID: bot.id) },
@@ -316,7 +326,7 @@ private struct ConnectionSettingsTab: View {
                     }
                     Spacer(minLength: 8)
                     Text(latencyText)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(Tokens.mono)
                         .foregroundStyle(Tokens.textMuted)
                 }
             } header: {

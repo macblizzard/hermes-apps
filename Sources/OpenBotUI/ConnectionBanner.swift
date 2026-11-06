@@ -49,7 +49,7 @@ public struct ConnectionBanner: View {
                 .opacity(pulse ? 0.35 : 1)
 
             Text(message)
-                .font(TypeScale.font(11.5))
+                .font(TypeScale.font(TypeScale.label))
                 .foregroundStyle(Tokens.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 

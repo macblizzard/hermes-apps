@@ -40,7 +40,7 @@ struct SidebarBotList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             captionRow
-                .padding(.horizontal, 2)
+                .padding(.horizontal, 8)
 
             if visibleBots.isEmpty, !(showsHiddenBots && !hiddenBots.isEmpty) {
                 emptyRow
@@ -67,9 +67,9 @@ struct SidebarBotList: View {
                 Toggle("Show hidden bots", isOn: $showsHiddenBots)
             } label: {
                 Image(systemName: "line.3.horizontal.decrease.circle")
-                    .font(.system(size: 11, weight: .regular))
+                    .font(TypeScale.font(TypeScale.label))
                     .foregroundStyle(showsHiddenBots ? Tokens.accentText : Tokens.textDim)
-                    .frame(width: 18, height: 16)
+                    .frame(minWidth: 24, minHeight: 24)
                     .contentShape(Rectangle())
             }
             .menuStyle(.borderlessButton)
@@ -137,7 +137,7 @@ struct SidebarBotList: View {
 
                         if isPinned {
                             Image(systemName: "pin.fill")
-                                .font(.system(size: 8, weight: .semibold))
+                                .font(TypeScale.font(TypeScale.micro, weight: .semibold))
                                 .foregroundStyle(Tokens.textMuted)
                                 .accessibilityHidden(true)
                         }
@@ -155,7 +155,7 @@ struct SidebarBotList: View {
                 if model.hasUnread(bot.id) {
                     // The phone's green dot: a reply that landed while this bot was not on screen.
                     Circle()
-                        .fill(Color.green)
+                        .fill(Tokens.success)
                         .frame(width: 6, height: 6)
                         .accessibilityHidden(true)
                 }

@@ -1,3 +1,4 @@
+import OpenBotUI
 import SwiftUI
 
 /// Management uses its own window so it is available even while the socket is disconnected.
@@ -12,44 +13,79 @@ struct MacDevicesView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Paired Devices").font(.title2.bold())
+                Text("Paired Devices")
+                    .font(TypeScale.font(Tokens.textXL, weight: .semibold))
+                    .foregroundStyle(Tokens.textPrimary)
                 Spacer()
                 if busy { ProgressView().controlSize(.small) }
-                Button("Refresh") { Task { await refresh() } }
-                    .disabled(busy || store.pairing == nil || store.pairing?.isTicketOnly == true)
+                OpenBotButton("Refresh",
+                              kind: .secondary,
+                              size: .small,
+                              isDisabled: busy || store.pairing == nil || store.pairing?.isTicketOnly == true) {
+                    Task { await refresh() }
+                }
             }
             if let address = store.pairing {
-                Text("Devices on \(address.displayHost)").foregroundStyle(.secondary)
+                Text("Devices on \(address.displayHost)")
+                    .font(TypeScale.font(Tokens.textSM))
+                    .foregroundStyle(Tokens.textMuted)
                 if address.isTicketOnly {
                     Text("Device management requires a device ID and refresh token. Pair this Mac as a device first.")
-                        .foregroundStyle(.secondary)
+                        .font(TypeScale.font(Tokens.textSM))
+                        .foregroundStyle(Tokens.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    if let error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-                    if let notice { Text(notice).foregroundStyle(.secondary) }
+                    if let error {
+                        Text(error)
+                            .font(TypeScale.font(TypeScale.caption))
+                            .foregroundStyle(Tokens.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    if let notice {
+                        Text(notice)
+                            .font(TypeScale.font(Tokens.textSM))
+                            .foregroundStyle(Tokens.textMuted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if devices.isEmpty && !busy && error == nil && notice == nil {
-                        Text("No devices found.").foregroundStyle(.secondary)
+                        Text("No devices found.")
+                            .font(TypeScale.font(Tokens.textSM))
+                            .foregroundStyle(Tokens.textMuted)
                     }
                     List(devices) { device in
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(device.name + (device.deviceID == address.deviceID ? " (This Mac)" : ""))
-                                    .fontWeight(.medium)
+                                    .font(TypeScale.font(Tokens.textMD, weight: .medium))
+                                    .foregroundStyle(Tokens.textPrimary)
                                 Text("\(device.platform) · \(device.revoked ? "Revoked" : "Active")")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                Text(device.deviceID).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                                    .font(TypeScale.font(TypeScale.caption))
+                                    .foregroundStyle(Tokens.textMuted)
+                                Text(device.deviceID)
+                                    .font(TypeScale.font(TypeScale.micro))
+                                    .foregroundStyle(Tokens.textDim)
+                                    .textSelection(.enabled)
                             }
                             Spacer()
-                            Button(device.revoked ? "Remove…" : "Revoke…") { pending = device }
-                                .disabled(busy)
+                            OpenBotButton(device.revoked ? "Remove…" : "Revoke…",
+                                          kind: .ghost,
+                                          size: .small,
+                                          isDisabled: busy) { pending = device }
                         }.padding(.vertical, 4)
                     }
+                    .scrollContentBackground(.hidden)
                 }
             } else {
-                Text("Pair a host before managing devices.").foregroundStyle(.secondary)
+                Text("Pair a host before managing devices.")
+                    .font(TypeScale.font(Tokens.textSM))
+                    .foregroundStyle(Tokens.textMuted)
             }
         }
         .padding(20)
         .frame(minWidth: 520, minHeight: 360)
+        .background(Tokens.canvas)
+        .preferredColorScheme(.dark)
         .task(id: store.pairing) { await refresh() }
         .confirmationDialog(pending?.revoked == true ? "Permanently remove device?" : "Revoke device?",
                             isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),

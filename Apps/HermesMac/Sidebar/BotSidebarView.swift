@@ -25,6 +25,7 @@ struct BotSidebarView: View {
             // The list takes every point left between the header and the host chip: on this
             // screen the bots *are* the panel, not a block above a session list.
             content
+                .padding(.horizontal, Geometry.sidebarInset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             HostStatusBar(model: model, store: store)
         }
@@ -55,7 +56,7 @@ struct BotSidebarView: View {
 
             SettingsLink {
                 Image(systemName: "gearshape")
-                    .font(.system(size: 11, weight: .regular))
+                    .font(TypeScale.font(TypeScale.label))
                     .foregroundStyle(Tokens.textMuted)
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
@@ -64,7 +65,7 @@ struct BotSidebarView: View {
             .help("Settings (⌘,)")
             .accessibilityLabel("Settings")
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, Geometry.sidebarInset)
         .padding(.top, 8)
         .padding(.bottom, 2)
     }
@@ -90,7 +91,6 @@ struct BotSidebarView: View {
                            store: store,
                            showsHiddenBots: $showsHiddenBots,
                            fillsAvailableHeight: true)
-                .padding(.horizontal, 6)
                 .padding(.bottom, 6)
         }
     }
@@ -100,16 +100,16 @@ struct BotSidebarView: View {
     private var unpairedState: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionCaption("NO HOST")
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             Text("Pair this Mac with your Hermes host to list its bots. Nothing is sent until you do.")
                 .font(TypeScale.font(Tokens.textSM))
                 .foregroundStyle(Tokens.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             OpenBotButton("Pair host…", systemImage: "link", kind: .secondary, size: .small) {
                 store.isPairSheetPresented = true
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 8)
         }
         .padding(.top, 8)
     }
@@ -119,12 +119,12 @@ struct BotSidebarView: View {
     private var notConnectedState: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionCaption("NOT CONNECTED")
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             Text("Connect to \(store.pairing?.displayHost ?? model.hostName) to list its bots.")
                 .font(TypeScale.font(Tokens.textSM))
                 .foregroundStyle(Tokens.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             OpenBotButton("Connect",
                           systemImage: "bolt.horizontal",
                           kind: .secondary,
@@ -132,7 +132,7 @@ struct BotSidebarView: View {
                           isBusy: model.connection == .connecting) {
                 Task { await store.connect() }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 8)
         }
         .padding(.top, 8)
     }
@@ -143,24 +143,24 @@ struct BotSidebarView: View {
     private var noBotsState: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionCaption("NO BOTS")
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             Text("No bots found on this host.")
                 .font(TypeScale.font(Tokens.textSM, weight: .medium))
                 .foregroundStyle(Tokens.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             Text("The gateway answered, but listed no profiles. Check that this host has a Hermes bot to talk to, then check again.")
                 .font(TypeScale.font(Tokens.textSM))
                 .foregroundStyle(Tokens.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             OpenBotButton("Check again",
                           systemImage: "arrow.clockwise",
                           kind: .secondary,
                           size: .small) {
                 Task { await store.loadBots() }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 8)
         }
         .padding(.top, 8)
     }
@@ -169,17 +169,17 @@ struct BotSidebarView: View {
     private func botsErrorState(_ message: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionCaption("BOTS UNAVAILABLE")
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             Text("Could not list this host's bots.")
                 .font(TypeScale.font(Tokens.textSM, weight: .medium))
                 .foregroundStyle(Tokens.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             Text(message)
                 .font(TypeScale.font(Tokens.textSM))
                 .foregroundStyle(Tokens.textMuted)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             OpenBotButton("Try again",
                           systemImage: "arrow.clockwise",
                           kind: .secondary,
@@ -187,7 +187,7 @@ struct BotSidebarView: View {
                           isDisabled: !model.connection.isLive) {
                 Task { await store.loadBots() }
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 8)
         }
         .padding(.top, 8)
     }
@@ -195,14 +195,14 @@ struct BotSidebarView: View {
     private var discoveringBotsState: some View {
         VStack(alignment: .leading, spacing: 8) {
             SectionCaption("FINDING BOTS")
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 8)
             HStack(spacing: 8) {
                 SpinningRing(color: Tokens.textDim, size: 10, lineWidth: 1.4)
                 Text("Asking the host which bots it serves…")
                     .font(TypeScale.font(Tokens.textSM))
                     .foregroundStyle(Tokens.textMuted)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 8)
         }
         .padding(.top, 8)
     }

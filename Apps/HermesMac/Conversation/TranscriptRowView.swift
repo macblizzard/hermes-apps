@@ -16,8 +16,10 @@ struct TranscriptRowView: View {
     var host: String = ""
     var bot: String = ""
     var session: String? = nil
+    /// "Select Text" is presented by `TranscriptScroll`: a row inside a `LazyVStack` is torn down
+    /// when it scrolls out, and a sheet it owns goes with it. The row asks; the transcript shows.
+    var onSelectText: (String) -> Void = { _ in }
     @State private var showingReactions = false
-    @State private var showingSelection = false
     @AppStorage("mac.messageReactions.v1") private var storedReactions = "{}"
     private static let speaker = AVSpeechSynthesizer()
     private static let emojis = ["👍", "❤️", "😂", "😮", "😢", "🎉"]
@@ -64,17 +66,11 @@ struct TranscriptRowView: View {
                 }
             }.padding()
         }
-        .sheet(isPresented: $showingSelection) {
-            VStack(alignment: .leading) {
-                HStack { Text("Select Text").font(.headline); Spacer(); Button("Done") { showingSelection = false } }
-                ScrollView { Text(entry.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
-            }.padding().frame(minWidth: 420, minHeight: 240)
-        }
     }
 
     @ViewBuilder private var messageMenu: some View {
         if entry.role == .user || entry.role == .assistant {
-            Button("Select Text") { showingSelection = true }
+            Button("Select Text") { onSelectText(entry.text) }
             Button("Read Aloud") {
                 Self.speaker.stopSpeaking(at: .immediate)
                 Self.speaker.speak(AVSpeechUtterance(string: entry.text))
@@ -109,7 +105,8 @@ struct TranscriptRowView: View {
 
             Text(entry.text)
                 .font(TypeScale.font(Tokens.chatBodyMacOS))
-                .lineSpacing(4)
+                // The same leading the assistant's prose gets: one table for chat text.
+                .lineSpacing(TypeScale.chatLineSpacing)
                 .foregroundStyle(Tokens.textPrimary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)

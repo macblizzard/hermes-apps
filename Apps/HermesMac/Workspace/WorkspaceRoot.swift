@@ -1,4 +1,5 @@
 import HermesAppKit
+import HermesKit
 import OpenBotUI
 import SwiftUI
 
@@ -21,9 +22,9 @@ struct WorkspaceRoot: View {
                 .ignoresSafeArea()
 
             WorkspaceShell(model: store.model, store: store)
-                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: Geometry.radiusWindow, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    RoundedRectangle(cornerRadius: Geometry.radiusWindow, style: .continuous)
                         .strokeBorder(Tokens.borderStrong, lineWidth: 1)
                 )
                 .padding(.horizontal, 8)
@@ -35,18 +36,59 @@ struct WorkspaceRoot: View {
         // One animation owner for the palette's whole lifecycle: the backdrop fades, the panel
         // rises a few points, and closing is the same motion in reverse.
         .animation(.easeOut(duration: 0.14), value: store.isPalettePresented)
-        .sheet(isPresented: $store.isPairSheetPresented) {
-            PairHostSheet(store: store)
+        // **One** sheet modifier, two routes.
+        //
+        // SwiftUI attaches a sheet per modifier: two `.sheet` modifiers on the same view means the
+        // second is silently dropped while the first is up (and the last one wins on re-render).
+        // So both doors — ⌘⇧P / "Pair host…", and the bot-settings door that the bot list's context
+        // menu and the conversation's menu both open — are folded into one `.sheet(item:)` over a
+        // small local route. The store stays the source of truth: the binding reads its two flags
+        // and dismisses by clearing them.
+        .sheet(item: presentation) { route in
+            switch route {
+            case .pair:
+                PairHostSheet(store: store)
+            case .botSettings(let bot):
+                MacBotSettingsSheet(model: store.model,
+                                    store: store,
+                                    bot: bot,
+                                    conversationIsOpen: store.model.selectedBotID == bot.id)
+            }
         }
-        // One sheet, two doors: the bot list's context menu and the conversation's menu both set
-        // `botSettingsBot`, so the per-bot settings live in a single place. (Settings → Bots has
-        // a third door, and presents the same sheet from its own window.)
-        .sheet(item: $store.botSettingsBot) { bot in
-            MacBotSettingsSheet(model: store.model,
-                                store: store,
-                                bot: bot,
-                                conversationIsOpen: store.model.selectedBotID == bot.id)
+    }
+
+    // MARK: - Sheets
+
+    /// The one thing a modal can be in this window. `id` is stable per route so re-reading the
+    /// store's flags does not re-present a sheet that is already on screen.
+    private enum WorkspacePresentation: Identifiable {
+        case pair
+        case botSettings(Bot)
+
+        var id: String {
+            switch self {
+            case .pair: return "pair"
+            case .botSettings(let bot): return "bot-settings:\(bot.id)"
+            }
         }
+    }
+
+    /// Pairing outranks bot settings: both are one-at-a-time, and pairing is the door that has to
+    /// be reachable when nothing else works. Dismissing clears both flags, so a sheet can never be
+    /// left queued behind the one that closed.
+    private var presentation: Binding<WorkspacePresentation?> {
+        Binding(
+            get: {
+                if store.isPairSheetPresented { return .pair }
+                if let bot = store.botSettingsBot { return .botSettings(bot) }
+                return nil
+            },
+            set: { route in
+                guard route == nil else { return }
+                store.isPairSheetPresented = false
+                store.botSettingsBot = nil
+            }
+        )
     }
 
     // MARK: - Command palette (⌘K)
@@ -71,9 +113,9 @@ struct WorkspaceRoot: View {
                     .accessibilityLabel("Close the command palette")
 
                 CommandPaletteView(store: store)
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Geometry.radiusPalette, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: Geometry.radiusPalette, style: .continuous)
                             .strokeBorder(Tokens.borderStrong, lineWidth: 1)
                     )
                     .shadow(color: .black.opacity(0.42), radius: 26, y: 14)
@@ -104,6 +146,9 @@ struct WorkspaceShell: View {
                         range: WorkspaceStore.sidebarFloor...Geometry.sidebarMax,
                         onCommit: { store.endSidebarDrag() })
 
+            // The divider strip is `Geometry.paneDivider` of hit area; the boundary line itself is
+            // this one hairline, so the shell adds paneDivider + 1 to the conversation's minimum —
+            // the same sum `HermesMacApp`'s window minimum is built from.
             Hairline(.vertical)
 
             ConversationPane(model: model, store: store)

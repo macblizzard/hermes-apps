@@ -18,11 +18,14 @@ struct PaneDivider: View {
         ZStack {
             Rectangle()
                 .fill(Tokens.canvas)
+            // The persistent boundary line is drawn by the shell (one hairline, in
+            // `WorkspaceShell`); this view only *lights up* its hit strip, so the
+            // divider never draws a second line a couple of points from that one.
             Rectangle()
-                .fill(hovering ? Tokens.borderFocus : Tokens.border)
+                .fill(hovering ? Tokens.borderFocus : Color.clear)
                 .frame(width: 1)
         }
-        .frame(width: 7)
+        .frame(width: Geometry.paneDivider)
         .frame(maxHeight: .infinity)
         .contentShape(Rectangle())
         .onHover { inside in

@@ -65,6 +65,25 @@ struct ConversationHeader: View {
     }
 
     var body: some View {
+        // The header's chips are fixed-size, so at `Geometry.conversationMin` (424 pt) the strip
+        // used to push its own controls past the right edge. It now reads the pane width and drops
+        // the optional chips first, keeping the title and the two controls.
+        GeometryReader { proxy in
+            header(width: proxy.size.width)
+        }
+        .frame(height: 48)
+        .background(Tokens.canvas)
+    }
+
+    /// Widths at which each optional chip stops fitting next to a one-line title and the two
+    /// controls. Context is the first to go: it is the fact a compacted conversation explains.
+    private enum ChipBreakpoint {
+        static let context: CGFloat = 520
+        static let model: CGFloat = 600
+        static let notice: CGFloat = 460
+    }
+
+    private func header(width: CGFloat) -> some View {
         HStack(spacing: 9) {
             Avatar(title, size: .small, presence: presence)
 
@@ -81,22 +100,26 @@ struct ConversationHeader: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
+            // The title shrinks (and truncates) before anything to its right is displaced, and it
+            // never takes more than its share of the strip.
+            .frame(maxWidth: max(140, width * 0.42), alignment: .leading)
+            .layoutPriority(1)
 
             Spacer(minLength: 8)
 
             // A compaction is a real model turn on the host, so its outcome is a quiet note here
             // rather than a banner: nothing failed, the transcript was rewritten.
-            if let notice = model.compactionNotice {
+            if let notice = model.compactionNotice, width >= ChipBreakpoint.notice {
                 StatusChip(notice, tone: .neutral, size: .small)
             }
 
-            if let context = contextChipLabel {
+            if width >= ChipBreakpoint.context, let context = contextChipLabel {
                 StatusChip(context, tone: .neutral, size: .small)
             }
 
             // The open bot's own model, from the profile-scoped catalogue — never the gateway's
             // default, which is what a chip reading an unscoped call names.
-            if let label = modelChipLabel {
+            if width >= ChipBreakpoint.model, let label = modelChipLabel {
                 StatusChip(label, tone: .neutral, size: .small)
             }
 
@@ -116,10 +139,8 @@ struct ConversationHeader: View {
 
             moreMenu
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 8)
-        .frame(height: 48)
-        .background(Tokens.canvas)
+        .padding(.horizontal, Geometry.readingInset)
+        .frame(width: width, height: 48, alignment: .leading)
     }
 
     private var moreMenu: some View {

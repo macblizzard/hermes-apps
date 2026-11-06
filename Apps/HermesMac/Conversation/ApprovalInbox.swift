@@ -22,12 +22,23 @@ struct ApprovalInbox: View {
                     Spacer(minLength: 0)
                 }
 
-                ForEach(model.pendingRequests) { request in
-                    ApprovalRequestView(request: request, store: store)
+                // A queue of blocked turns must not eat the conversation: past 320 pt the cards
+                // scroll inside the strip instead of pushing the transcript off screen.
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.pendingRequests) { request in
+                            ApprovalRequestView(request: request, store: store)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxHeight: 320)
             }
+            // Content-sized, then capped: a `ScrollView` left alone is greedy and would hold the
+            // full 320 pt even for a single card.
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: Geometry.conversationMeasure, alignment: .leading)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, Geometry.readingInset)
             .padding(.top, 10)
             .padding(.bottom, 12)
             .frame(maxWidth: .infinity, alignment: .center)

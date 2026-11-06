@@ -31,7 +31,7 @@ struct CommandPaletteView: View {
         }
         .frame(width: 560, height: 440)
         .background(Tokens.sheet)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Geometry.radiusPalette, style: .continuous))
         .onAppear { focused = true }
         // As an overlay the view can appear before the window re-focuses; one runloop later is
         // when a text field actually takes first responder.
@@ -52,7 +52,7 @@ struct CommandPaletteView: View {
     private var searchRow: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 13, weight: .medium))
+                .font(TypeScale.font(Tokens.textMD, weight: .medium))
                 .foregroundStyle(Tokens.textDim)
 
             TextField("",
@@ -81,7 +81,7 @@ struct CommandPaletteView: View {
                 .accessibilityLabel("Search commands")
 
             Text("esc")
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .font(Tokens.mono)
                 .foregroundStyle(Tokens.textDim)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
@@ -123,7 +123,7 @@ struct CommandPaletteView: View {
         } label: {
             HStack(spacing: 9) {
                 Image(systemName: command.systemImage)
-                    .font(.system(size: 11, weight: .regular))
+                    .font(TypeScale.font(TypeScale.label))
                     .foregroundStyle(command.isEnabled ? Tokens.textSecondary : Tokens.textDim)
                     .frame(width: 24, height: 24)
                     .background(
@@ -147,15 +147,15 @@ struct CommandPaletteView: View {
                 Spacer(minLength: 8)
 
                 Text(command.group.rawValue.uppercased())
-                    .font(TypeScale.font(9, weight: .semibold))
+                    .font(TypeScale.font(TypeScale.micro, weight: .semibold))
                     .tracking(0.5)
                     .foregroundStyle(Tokens.textDim)
 
                 if let shortcut = command.shortcut {
                     Text(shortcut)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .font(Tokens.mono)
                         .foregroundStyle(Tokens.textDim)
-                        .frame(minWidth: 26, alignment: .trailing)
+                        .frame(minWidth: 30, alignment: .trailing)
                 }
             }
             .padding(.horizontal, 8)

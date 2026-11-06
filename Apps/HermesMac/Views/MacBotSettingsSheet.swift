@@ -58,8 +58,12 @@ struct MacBotSettingsSheet: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    Button("Choose bot icon…") { showingIconPicker = true }
-                        .disabled(store.pairing == nil || store.pairing?.isTicketOnly == true)
+                    OpenBotButton("Choose bot icon…",
+                                  kind: .secondary,
+                                  size: .small,
+                                  isDisabled: store.pairing == nil || store.pairing?.isTicketOnly == true) {
+                        showingIconPicker = true
+                    }
                     if let iconError = store.botIconsError {
                         Text("Could not refresh bot icons: \(iconError)")
                             .font(TypeScale.font(TypeScale.caption)).foregroundStyle(Tokens.danger)
@@ -76,7 +80,10 @@ struct MacBotSettingsSheet: View {
                 .padding(16)
             }
         }
-        .frame(width: 520, height: 560)
+        // A fixed height could not fit a short window; the inner ScrollView takes whatever
+        // height the sheet is given between the floor and the ceiling.
+        .frame(width: 520)
+        .frame(minHeight: 420, idealHeight: 560, maxHeight: 560)
         .background(Tokens.canvas)
         .task { await refresh() }
         .sheet(isPresented: $showingIconPicker) {
@@ -216,14 +223,25 @@ struct MacBotSettingsSheet: View {
     }
 
     private func modelsSection(_ catalog: ModelCatalog) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let options = filteredOptions(catalog)
+
+        return VStack(alignment: .leading, spacing: 6) {
             SectionCaption("MODELS")
 
             MacSidebarSearchField(text: $modelQuery, prompt: "Search models")
 
-            VStack(alignment: .leading, spacing: 1) {
-                ForEach(filteredOptions(catalog), id: \.self) { option in
-                    optionRow(option, current: catalog.current)
+            if options.isEmpty {
+                Text("No models match “\(modelQuery.trimmingCharacters(in: .whitespacesAndNewlines))”.")
+                    .font(TypeScale.font(TypeScale.sm))
+                    .foregroundStyle(Tokens.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+            } else {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(options, id: \.self) { option in
+                        optionRow(option, current: catalog.current)
+                    }
                 }
             }
 
@@ -258,7 +276,7 @@ struct MacBotSettingsSheet: View {
 
                 if isCurrent {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(TypeScale.font(TypeScale.caption, weight: .semibold))
                         .foregroundStyle(Tokens.accentText)
                         .accessibilityHidden(true)
                 }
