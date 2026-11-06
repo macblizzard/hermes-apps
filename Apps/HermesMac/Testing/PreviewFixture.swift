@@ -120,7 +120,10 @@ extension WorkspaceStore {
         // state, not a mock of it. Nothing here writes a preference: `setSidebarWidth` and
         // `showsContext` only persist from `endSidebarDrag` / `toggleContextPanel`.
         setSidebarWidth(280)
-        showsContext = true
+        // The context panel defaults to visible; setting the published property directly avoids
+        // `toggleContextPanel`, which would write `hermes.workspace.showsContext` to the user's
+        // real preferences from a test launch.
+        showsContextPanel = true
         if !model.isPinned(botID: UITestFixture.pinnedBotID) {
             model.togglePin(botID: UITestFixture.pinnedBotID)
         }
