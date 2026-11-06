@@ -48,16 +48,18 @@ enum AttachmentPickerError: LocalizedError {
 /// swallowed with `try?` — so the composer can say what went wrong.
 enum AttachmentRead {
     static func file(at url: URL) throws -> AttachmentPayload {
+        // `ubiquitousItemIsDownloaded` is macOS-only; iOS exposes the download status instead.
         let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentTypeKey,
                                          .nameKey, .isUbiquitousItemKey,
-                                         .ubiquitousItemIsDownloadedKey]
+                                         .ubiquitousItemDownloadingStatusKey]
         var values = try? url.resourceValues(forKeys: keys)
         if values?.isDirectory == true { throw AttachmentBudgetError.unsupportedFile }
 
         // An iCloud Drive item that is not on the device is a placeholder: every read of it
         // fails with ENOENT until something asks a coordinator for it. That is why picking a
         // file from Files could appear to do nothing at all.
-        let isPlaceholder = values?.isUbiquitousItem == true && values?.ubiquitousItemIsDownloaded == false
+        let isPlaceholder = values?.isUbiquitousItem == true
+            && values?.ubiquitousItemDownloadingStatus != .current
         if isPlaceholder || values?.fileSize == nil {
             try ensureMaterialised(url)
             values = try? url.resourceValues(forKeys: keys)
