@@ -68,7 +68,7 @@ enum AttachmentPickerError: LocalizedError {
     }
 }
 
-private enum AttachmentRead {
+enum AttachmentRead {
     static func file(_ url: URL, isImage: Bool) throws -> AttachmentPayload {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
@@ -79,7 +79,7 @@ private enum AttachmentRead {
     }
 }
 
-private struct AttachmentPhotos: UIViewControllerRepresentable {
+struct AttachmentPhotos: UIViewControllerRepresentable {
     let completion: (Result<AttachmentPayload, Error>) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(completion: completion) }
     func makeUIViewController(context: Context) -> PHPickerViewController {
@@ -111,7 +111,7 @@ private struct AttachmentPhotos: UIViewControllerRepresentable {
     }
 }
 
-private struct AttachmentCamera: UIViewControllerRepresentable {
+struct AttachmentCamera: UIViewControllerRepresentable {
     let completion: (Result<AttachmentPayload, Error>) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(completion: completion) }
     func makeUIViewController(context: Context) -> UIImagePickerController {

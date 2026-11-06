@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 import HermesKit
 import HermesAppKit
 import OpenBotUI
@@ -29,6 +30,8 @@ struct ConversationScreen: View {
     @State private var keyboardScrollTask: Task<Void, Never>?
     @State private var isDraggingTranscript = false
     @State private var showAttachmentPicker = false
+    @State private var attachmentSource: AttachmentSource?
+    @State private var showFileImporter = false
 
     /// One voice controller per conversation screen: recording, transcription and
     /// playback share an audio session, so they must not race each other.
@@ -39,6 +42,22 @@ struct ConversationScreen: View {
     @State private var showBotSettings = false
 
     private static let bottomID = "conversation-bottom"
+
+    /// The two system pickers that need their own presentation; Files uses `.fileImporter`.
+    enum AttachmentSource: String, Identifiable {
+        case camera, photos
+        var id: String { rawValue }
+    }
+
+    private func accept(_ result: Result<AttachmentPayload, Error>) {
+        attachmentSource = nil
+        switch result {
+        case .success(let payload):
+            model.addPendingAttachment(name: payload.name, data: payload.data, isImage: payload.isImage)
+        case .failure(let error):
+            notice = error.localizedDescription
+        }
+    }
 
     private var title: String { bot.displayName }
 
@@ -93,16 +112,34 @@ struct ConversationScreen: View {
                     }
                 })
         }
-        .sheet(isPresented: $showAttachmentPicker) {
-            AttachmentPicker { result in
-                showAttachmentPicker = false
-                switch result {
-                case .success(let payload):
-                    model.addPendingAttachment(name: payload.name, data: payload.data,
-                                               isImage: payload.isImage)
-                case .failure(let error):
-                    notice = error.localizedDescription
-                }
+        // A paperclip tap is a three-way choice, not a page: an action sheet, then the system
+        // picker for the one the user chose.
+        .confirmationDialog("Add attachment", isPresented: $showAttachmentPicker,
+                            titleVisibility: .visible) {
+            Button("Camera") { attachmentSource = .camera }
+            Button("Photos") { attachmentSource = .photos }
+            Button("Files") { showFileImporter = true }
+            Button("Cancel", role: .cancel) {}
+        }
+        .sheet(item: $attachmentSource) { source in
+            switch source {
+            case .camera:
+                AttachmentCamera { accept($0) }.ignoresSafeArea()
+            case .photos:
+                AttachmentPhotos { accept($0) }.ignoresSafeArea()
+            }
+        }
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item]) { result in
+            switch result {
+            case .success(let url):
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let isImage = (try? url.resourceValues(forKeys: [.contentTypeKey])
+                    .contentType?.conforms(to: .image)) ?? false
+                do { accept(.success(try AttachmentRead.file(url, isImage: isImage))) }
+                catch { accept(.failure(error)) }
+            case .failure(let error):
+                accept(.failure(error))
             }
         }
         .sheet(isPresented: $showApprovalSheet) {
