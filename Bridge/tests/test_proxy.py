@@ -433,7 +433,8 @@ def test_unknown_ticket_is_rejected_before_upgrade(bridge, fake_gateway):
 def test_revoked_device_cannot_open_a_socket(bridge, fake_gateway):
     paired = bridge.pair()
     with bridge.client() as client:
-        assert client.delete(f"/v1/devices/{paired['device_id']}").status_code == 200
+        headers = {"Authorization": "Bearer " + bridge.mint_ticket(paired["device_id"])}
+        assert client.delete(f"/v1/devices/{paired['device_id']}", headers=headers).status_code == 200
 
     async def scenario():
         with pytest.raises(InvalidStatus):

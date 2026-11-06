@@ -275,15 +275,16 @@ final class AppEnvironment: ObservableObject {
     // MARK: - Devices
 
     func loadDevices() async {
-        guard let host = store.host else {
+        guard let host = store.host, let token = store.refreshToken else {
             devices = []
+            devicesError = "Cannot load devices: this phone is not paired."
             return
         }
         devicesLoading = true
         devicesError = nil
         defer { devicesLoading = false }
         do {
-            devices = try await bridge.devices(for: host)
+            devices = try await bridge.devices(for: host, refreshToken: token)
         } catch {
             // Keep the last list: a stale device list beats an empty one with a scary
             // error, and Settings shows the error above it.
@@ -292,10 +293,13 @@ final class AppEnvironment: ObservableObject {
     }
 
     func revoke(_ device: PairedDevice) async {
-        guard let host = store.host else { return }
+        guard let host = store.host, let token = store.refreshToken else {
+            devicesError = "Cannot revoke the device: this phone is not paired."
+            return
+        }
         devicesError = nil
         do {
-            try await bridge.revoke(deviceID: device.deviceID, on: host)
+            try await bridge.revoke(deviceID: device.deviceID, on: host, refreshToken: token)
             if let index = devices.firstIndex(where: { $0.deviceID == device.deviceID }) {
                 devices[index].revoked = true
             }

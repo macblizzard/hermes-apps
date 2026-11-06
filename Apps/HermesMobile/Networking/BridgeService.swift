@@ -12,10 +12,10 @@ protocol BridgeServiceProtocol: Sendable {
     /// `POST /v1/token` — refresh token → a 30-second, single-use websocket ticket,
     /// returned as the URL the gateway transport should open.
     func websocketURL(for host: PairedHost, refreshToken: String) async throws -> URL
-    func devices(for host: PairedHost) async throws -> [PairedDevice]
-    /// `DELETE /v1/devices/{id}` — permanent on the bridge, and it kills outstanding
-    /// tickets immediately.
-    func revoke(deviceID: String, on host: PairedHost) async throws
+    func devices(for host: PairedHost, refreshToken: String) async throws -> [PairedDevice]
+    /// Revoke a device using a fresh single-use ticket; revoking this phone invalidates its
+    /// refresh token immediately after this request succeeds.
+    func revoke(deviceID: String, on host: PairedHost, refreshToken: String) async throws
     /// Permanently remove one already-revoked device using a fresh single-use ticket.
     func removeRevoked(deviceID: String, on host: PairedHost, refreshToken: String) async throws
 }
@@ -106,17 +106,15 @@ struct LiveBridgeService: BridgeServiceProtocol, @unchecked Sendable {
         return url
     }
 
-    func devices(for host: PairedHost) async throws -> [PairedDevice] {
-        let request = URLRequest(url: host.baseURL.appendingPathComponent("v1/devices"))
-        let data = try await send(request)
+    func devices(for host: PairedHost, refreshToken: String) async throws -> [PairedDevice] {
+        let data = try await authenticatedRequest("v1/devices", host: host, refreshToken: refreshToken)
         let rows = try decode([DeviceDTO].self, from: data)
         return rows.map(\.model)
     }
 
-    func revoke(deviceID: String, on host: PairedHost) async throws {
-        var request = URLRequest(url: host.baseURL.appendingPathComponent("v1/devices/\(deviceID)"))
-        request.httpMethod = "DELETE"
-        _ = try await send(request)
+    func revoke(deviceID: String, on host: PairedHost, refreshToken: String) async throws {
+        _ = try await authenticatedRequest("v1/devices/\(deviceID)", host: host,
+                                           refreshToken: refreshToken, method: "DELETE")
     }
 
     func removeRevoked(deviceID: String, on host: PairedHost, refreshToken: String) async throws {
@@ -133,6 +131,20 @@ struct LiveBridgeService: BridgeServiceProtocol, @unchecked Sendable {
             throw BridgeError.http(status: 401, message: "Authentication failed. Reconnect or pair this phone again.")
         } catch BridgeError.http(status: 409, message: let detail) {
             throw BridgeError.http(status: 409, message: detail ?? "The device cannot be removed because it is not revoked.")
+        }
+    }
+
+    private func authenticatedRequest(_ path: String, host: PairedHost, refreshToken: String,
+                                      method: String = "GET") async throws -> Data {
+        do {
+            let body = TokenBody(deviceID: host.deviceID, refreshToken: refreshToken)
+            let ticket: TokenResponse = try await post("v1/token", base: host.baseURL, body: body)
+            var request = URLRequest(url: host.baseURL.appendingPathComponent(path))
+            request.httpMethod = method
+            request.setValue("Bearer \(ticket.wsTicket)", forHTTPHeaderField: "Authorization")
+            return try await send(request)
+        } catch BridgeError.http(status: 401, message: _) {
+            throw BridgeError.http(status: 401, message: "Authentication failed. Reconnect or pair this phone again.")
         }
     }
 
@@ -283,7 +295,7 @@ struct PreviewBridgeService: BridgeServiceProtocol {
         return url
     }
 
-    func devices(for host: PairedHost) async throws -> [PairedDevice] {
+    func devices(for host: PairedHost, refreshToken: String) async throws -> [PairedDevice] {
         [PairedDevice(deviceID: "dev-preview",
                       name: "Cody's iPhone",
                       platform: "ios",
@@ -304,6 +316,6 @@ struct PreviewBridgeService: BridgeServiceProtocol {
                       revoked: true)]
     }
 
-    func revoke(deviceID: String, on host: PairedHost) async throws {}
+    func revoke(deviceID: String, on host: PairedHost, refreshToken: String) async throws {}
     func removeRevoked(deviceID: String, on host: PairedHost, refreshToken: String) async throws {}
 }

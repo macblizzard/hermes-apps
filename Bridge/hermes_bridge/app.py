@@ -248,7 +248,8 @@ def create_app(
         )
 
     @app.get("/v1/devices")
-    def devices() -> list[dict]:
+    def devices(authorization: Optional[str] = Header(default=None)) -> list[dict]:
+        require_device(runtime, authorization)
         return [
             {
                 "device_id": d.device_id,
@@ -262,7 +263,8 @@ def create_app(
         ]
 
     @app.delete("/v1/devices/{device_id}")
-    async def revoke(device_id: str) -> dict:
+    async def revoke(device_id: str, authorization: Optional[str] = Header(default=None)) -> dict:
+        require_device(runtime, authorization)
         if runtime.registry.get(device_id) is None:
             raise HTTPException(status_code=404, detail="unknown device")
         runtime.registry.revoke(device_id)
