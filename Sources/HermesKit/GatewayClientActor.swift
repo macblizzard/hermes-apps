@@ -424,6 +424,25 @@ public actor GatewayClient: GatewayClientProtocol {
                         provider: applied?["provider"]?.stringValue ?? provider)
     }
 
+    /// `profiles.configure`, description section only.
+    ///
+    /// Exactly two params go on the wire — `name` and `description`. Sending the model fields too
+    /// (with the values the client last saw) would turn a description edit into a model change and
+    /// could trip the host's expensive-model confirmation for no reason.
+    public func configureDescription(profile: String, description: String) async throws {
+        let result = try await perform("profiles.configure", params: .object([
+            "name": .string(profile),
+            "description": .string(description),
+        ]), timeout: timeouts.sessionResume)
+        if result?["confirm_required"]?.boolValue == true {
+            // A description is never an expensive model; if the host asks, something is wrong.
+            throw GatewayError.malformedResponse(method: "profiles.configure")
+        }
+        guard result?["ok"]?.boolValue != false else {
+            throw GatewayError.malformedResponse(method: "profiles.configure")
+        }
+    }
+
     // MARK: Attachments
 
     /// The bridge's decoded-byte ceiling; refused here as well so the user sees the limit instead of

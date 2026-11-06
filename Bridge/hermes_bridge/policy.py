@@ -101,17 +101,46 @@ SERVER_REQUEST_METHODS = frozenset(
 
 _METHOD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
 
+#: The only sections of the gateway's broad profile editor the app may write: the model pair and
+#: the human-readable description. Everything else (``soul``, ``ui_meta``, skills, toolsets, MCP…)
+#: stays host-only.
+_ALLOWED_PROFILE_SECTIONS = frozenset(
+    {"name", "model", "provider", "confirm_expensive_model", "description"}
+)
+
 
 def is_bot_model_configure_allowed(params: object) -> bool:
-    """Expose only the model section of the gateway's broad profile editor."""
+    """Allow a profile edit only when it is the model pair and/or the description.
+
+    The gateway's ``profiles.configure`` accepts far more (soul, ui_meta, skills, toolsets, MCP),
+    so presence on the allow-list is not enough: the params themselves are checked. ``name`` is
+    always required; ``model`` and ``provider`` must come together; ``description`` may be an
+    empty string (that clears it). Any unknown key rejects the whole request.
+    """
     if not isinstance(params, dict):
         return False
-    if set(params) - {"name", "model", "provider", "confirm_expensive_model"}:
+    if set(params) - _ALLOWED_PROFILE_SECTIONS:
         return False
-    if not all(isinstance(params.get(key), str) and params[key].strip()
-               for key in ("name", "model", "provider")):
+    if not (isinstance(params.get("name"), str) and params["name"].strip()):
         return False
-    return "confirm_expensive_model" not in params or type(params["confirm_expensive_model"]) is bool
+
+    has_description = "description" in params
+    has_model = "model" in params or "provider" in params
+    if not has_description and not has_model:
+        return False
+    if has_description and not isinstance(params["description"], str):
+        return False
+
+    if has_model:
+        if not all(isinstance(params.get(key), str) and params[key].strip()
+                   for key in ("model", "provider")):
+            return False
+        if "confirm_expensive_model" in params and type(params["confirm_expensive_model"]) is not bool:
+            return False
+    elif "confirm_expensive_model" in params:
+        # A confirmation only means something next to a model change.
+        return False
+    return True
 
 
 def is_valid_method_name(method: object) -> TypeGuard[str]:

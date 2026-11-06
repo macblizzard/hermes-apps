@@ -43,7 +43,15 @@ final class ScriptedHost: GatewayClientProtocol, @unchecked Sendable {
 
     // MARK: Bots
 
-    func listBots() async throws -> [Bot] { [Bot(id: "cody")] }
+    var bots: [Bot] = [Bot(id: "cody")]
+    /// Every `configureDescription` call, so a test can prove what crossed the client boundary.
+    private(set) var descriptions: [(String, String)] = []
+
+    func listBots() async throws -> [Bot] { bots }
+
+    func configureDescription(profile: String, description: String) async throws {
+        descriptions.append((profile, description))
+    }
 
     // MARK: Sessions
 

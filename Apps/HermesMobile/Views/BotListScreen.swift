@@ -52,7 +52,9 @@ struct BotListScreen: View {
     }
 
     private var filtered: [Bot] {
-        let ordered = BotActivityOrder.order(model.bots, activity: model.botActivity)
+        let ordered = BotActivityOrder.order(model.bots,
+                                             activity: model.botActivity,
+                                             pinned: model.pinnedBots)
         guard !trimmedQuery.isEmpty else { return ordered }
         return ordered.filter { bot in
             bot.displayName.localizedCaseInsensitiveContains(trimmedQuery)
@@ -102,6 +104,9 @@ struct BotListScreen: View {
                     case .confirmationRequired(let message):
                         return .confirmationRequired(message)
                     }
+                },
+                saveDescription: { botID, text in
+                    try await model.configureDescription(botID: botID, description: text)
                 })
         }
         .sheet(item: $iconBot) { bot in
@@ -134,10 +139,19 @@ struct BotListScreen: View {
                 }
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(bot.displayName)
-                        .font(TypeScale.font(TypeScale.sessionTitle, weight: .semibold))
-                        .foregroundStyle(Tokens.textPrimary)
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(bot.displayName)
+                            .font(TypeScale.font(TypeScale.sessionTitle, weight: .semibold))
+                            .foregroundStyle(Tokens.textPrimary)
+                            .lineLimit(1)
+
+                        if model.isPinned(botID: bot.id) {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Tokens.textMuted)
+                                .accessibilityHidden(true)
+                        }
+                    }
 
                     Text(subtitle(for: bot))
                         .font(TypeScale.font(TypeScale.sessionPreview))
@@ -164,20 +178,36 @@ struct BotListScreen: View {
         }
         .buttonStyle(.plain)
         .contextMenu {
+            Button {
+                model.togglePin(botID: bot.id)
+            } label: {
+                model.isPinned(botID: bot.id)
+                    ? Label("Unpin", systemImage: "pin.slash")
+                    : Label("Pin", systemImage: "pin")
+            }
             Button { iconBot = bot } label: { Label("Bot icon", systemImage: "person.crop.circle") }
             Button { settingsBot = bot } label: { Label("Bot Settings", systemImage: "gearshape") }
         }
         .listRowBackground(Tokens.canvas)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-        .accessibilityLabel(bot.id == lastOpenedID ? "\(bot.displayName), bot, last opened" : "\(bot.displayName), bot")
+        .accessibilityLabel(accessibilityLabel(for: bot))
         .accessibilityHint("Opens the conversation with this bot")
     }
 
-    /// A profile whose id is its own name has nothing left worth printing twice, so the
-    /// subtitle names what the row is rather than repeating the title.
+    /// A description written on the host is the useful line; without one, name what the row is.
+    /// A profile whose id is its own name has nothing worth printing twice, so it gets a label
+    /// rather than a repeat of the title.
     private func subtitle(for bot: Bot) -> String {
-        bot.id == bot.displayName ? "Hermes profile" : bot.id
+        if let description = bot.description, !description.isEmpty { return description }
+        return bot.id == bot.displayName ? "Hermes profile" : bot.id
+    }
+
+    private func accessibilityLabel(for bot: Bot) -> String {
+        var parts = [bot.displayName, "bot"]
+        if model.isPinned(botID: bot.id) { parts.append("pinned") }
+        if bot.id == lastOpenedID { parts.append("last opened") }
+        return parts.joined(separator: ", ")
     }
 
     private var loadingRow: some View {

@@ -348,7 +348,8 @@ enum GatewayPayloadDecoder {
             guard let name = profileName(object) else { return nil }
             // A display label is a nicety: the profile name is what the switcher falls back to.
             let display = object["display_name"]?.stringValue ?? object["label"]?.stringValue
-            return Bot(id: name, name: name, displayName: display)
+            return Bot(id: name, name: name, displayName: display,
+                       description: object["description"]?.stringValue)
         default:
             return nil
         }

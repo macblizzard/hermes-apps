@@ -613,7 +613,7 @@ class GatewayProxy:
             )
         if pending is not None and pending.method == "profiles.configure" and frame.get("error"):
             frame = dict(frame)
-            frame["error"] = {"code": -32603, "message": "profile model update failed"}
+            frame["error"] = {"code": -32603, "message": "profile update failed"}
         if pending is not None and pending.method in ATTACHMENT_METHODS:
             frame = dict(frame)
             if frame.get("error"):

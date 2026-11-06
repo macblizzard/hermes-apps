@@ -172,6 +172,11 @@ public final class AppModel: ObservableObject {
     /// whichever chat was merely opened. Persisted per host: it is a UI fact, not host state.
     @Published public private(set) var botActivity: [String: Date] = [:]
 
+    /// Bots the user pinned to the top of the list on this host. Like activity this is a UI
+    /// preference, not host state, so it is persisted per host in UserDefaults. Several pins keep
+    /// the host's order among themselves; anything unpinned stays in activity order.
+    @Published public private(set) var pinnedBots: Set<String> = []
+
     @Published public var draft: String = ""
     /// Picked but not yet sent. Held locally so a cancelled composer leaves nothing on the host.
     @Published public private(set) var pendingAttachments: [PendingAttachment] = []
@@ -211,6 +216,7 @@ public final class AppModel: ObservableObject {
             connection = .connected
             await observeEvents()
             loadBotActivity()
+            loadPinnedBots()
             await loadBots()
             await loadModelLabel()
             await loadSessions()
@@ -711,6 +717,34 @@ public final class AppModel: ObservableObject {
         Self.defaults.set(botActivity.mapValues(\.timeIntervalSince1970), forKey: botActivityKey)
     }
 
+    // MARK: Bot pins
+
+    /// Pin or unpin one bot. Pins are ordered by the host's own list, so there is no pin
+    /// timestamp to keep: the set is enough, and toggling is idempotent per bot.
+    public func togglePin(botID: String) {
+        guard !botID.isEmpty else { return }
+        if pinnedBots.contains(botID) {
+            pinnedBots.remove(botID)
+        } else {
+            pinnedBots.insert(botID)
+        }
+        persistPinnedBots()
+    }
+
+    public func isPinned(botID: String) -> Bool { pinnedBots.contains(botID) }
+
+    private var pinnedBotsKey: String { "hermes.pinnedBots.\(hostName)" }
+
+    private func loadPinnedBots() {
+        pinnedBots = Set(Self.defaults.stringArray(forKey: pinnedBotsKey) ?? [])
+    }
+
+    /// A pin for a bot the host no longer serves is harmless and is kept: if the profile comes
+    /// back, so does its place at the top.
+    private func persistPinnedBots() {
+        Self.defaults.set(pinnedBots.sorted(), forKey: pinnedBotsKey)
+    }
+
     // MARK: Per-bot model
 
     /// The model menu for one bot. Scoped, because each profile has its own catalogue and its own
@@ -733,6 +767,19 @@ public final class AppModel: ObservableObject {
             await loadModelLabel()
         }
         return change
+    }
+
+    // MARK: Per-bot description
+
+    /// Write a bot's human-readable description to the host, then mirror it locally so the list's
+    /// subtitle changes immediately. The host stays the source of truth for the next `loadBots()`,
+    /// which is also what makes the text sync to other devices.
+    public func configureDescription(botID: String, description: String) async throws {
+        let text = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        try await client.configureDescription(profile: botID, description: text)
+        if let index = bots.firstIndex(where: { $0.id == botID }) {
+            bots[index] = bots[index].withDescription(text)
+        }
     }
 
     // MARK: Latency

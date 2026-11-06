@@ -92,6 +92,13 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
     /// override, and the host only adopts the new default for turns that are not pinned.
     func configureModel(profile: String, model: String, provider: String, confirm: Bool) async throws -> ProfileModelChange
 
+    /// Set a bot's human-readable description (`profiles.configure`, description section only).
+    ///
+    /// Sends exactly `{name, description}` — no model, no provider, no other section — so the
+    /// bridge's allow-list can keep this to one field of the profile. The text is stored on the
+    /// host, which is what makes it follow the bot to every device. An empty string clears it.
+    func configureDescription(profile: String, description: String) async throws
+
     // Compaction
     /// Attach bytes to the session's next turn.
     ///
@@ -135,12 +142,16 @@ public struct Bot: Identifiable, Hashable, Sendable {
     public let label: String
     /// One or two characters for the avatar circle ("cody" → "C", "corvus-ops" → "CO").
     public let avatarInitials: String
+    /// A human-readable line about the bot, stored on the host and shared by every device
+    /// (`profiles.list` sends it, `profiles.configure` writes it). `nil` when the host has none.
+    public let description: String?
 
     public init(id: String,
                 name: String? = nil,
                 displayName: String? = nil,
                 label: String? = nil,
-                avatarInitials: String? = nil) {
+                avatarInitials: String? = nil,
+                description: String? = nil) {
         let resolvedName = Self.trimmed(name) ?? id
         let resolvedDisplay = Self.trimmed(displayName) ?? resolvedName
         self.id = id
@@ -148,6 +159,13 @@ public struct Bot: Identifiable, Hashable, Sendable {
         self.displayName = resolvedDisplay
         self.label = Self.trimmed(label) ?? resolvedDisplay
         self.avatarInitials = Self.trimmed(avatarInitials) ?? Self.initials(for: resolvedDisplay)
+        self.description = Self.trimmed(description)
+    }
+
+    /// A copy carrying a new host description, keeping every other field as the host reported it.
+    public func withDescription(_ value: String?) -> Bot {
+        Bot(id: id, name: name, displayName: displayName, label: label,
+            avatarInitials: avatarInitials, description: value)
     }
 
     /// First letter of the name, or of its first two words ("cody" → "C", "night-shift" → "NS").
@@ -176,6 +194,13 @@ public extension GatewayClientProtocol {
     /// Stubs have no profiles to configure; say so instead of pretending the change landed.
     func configureModel(profile: String, model: String, provider: String, confirm: Bool) async throws -> ProfileModelChange {
         _ = (profile, model, provider, confirm)
+        throw GatewayError.rpc(RPCError(code: -32601,
+                                        message: "this client cannot configure a profile"))
+    }
+
+    /// Same for a description: a stub that cannot write it must not report success.
+    func configureDescription(profile: String, description: String) async throws {
+        _ = (profile, description)
         throw GatewayError.rpc(RPCError(code: -32601,
                                         message: "this client cannot configure a profile"))
     }
