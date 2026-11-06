@@ -11,6 +11,11 @@ import SwiftUI
 struct TranscriptScroll: View {
     @ObservedObject var model: AppModel
 
+    /// Bumped by the header's magnifier (`WorkspaceStore.openFindInChat`). The search lives here,
+    /// so this is a request to open the field and take the caret — not shared state: the field,
+    /// its query and its match index are local to the reading surface.
+    var findRequest: Int = 0
+
     @State private var searching = false
     @State private var query = ""
     @State private var matchIndex = 0
@@ -73,6 +78,9 @@ struct TranscriptScroll: View {
         .sheet(isPresented: selectionSheetPresented) {
             SelectTextSheet(text: selectionText ?? "") { selectionText = nil }
         }
+        // ⌘F and the magnifier land in the same place; a second press re-focuses a field that is
+        // already open instead of doing nothing.
+        .onChange(of: findRequest) { _, _ in openSearch() }
     }
 
     // MARK: - Transcript
@@ -290,8 +298,7 @@ struct TranscriptScroll: View {
     /// VoiceOver and to the UI tests.
     private var searchShortcut: some View {
         Button {
-            searching = true
-            searchFocused = true
+            openSearch()
         } label: {
             EmptyView()
         }
@@ -322,6 +329,11 @@ struct TranscriptScroll: View {
         searching = false
         query = ""
         matchIndex = 0
+    }
+
+    private func openSearch() {
+        searching = true
+        searchFocused = true
     }
 
     private func scroll(_ proxy: ScrollViewProxy, duration: Double = 0.15) {

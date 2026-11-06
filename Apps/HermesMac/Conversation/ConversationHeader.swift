@@ -131,10 +131,12 @@ struct ConversationHeader: View {
                 StatusChip("needs you", tone: .warning, showsDot: true, size: .small)
             }
 
+            // Find in this conversation, not the palette: a magnifier over a transcript means
+            // "search what I am reading". ⌘K and the ⋯ menu keep the palette where it belongs.
             OpenBotIconButton("magnifyingglass",
-                              label: "Command palette (⌘K)",
+                              label: "Search conversation (⌘F)",
                               size: .small) {
-                store.togglePalette()
+                store.openFindInChat()
             }
 
             moreMenu

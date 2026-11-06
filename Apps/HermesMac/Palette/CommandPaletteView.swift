@@ -106,13 +106,24 @@ struct CommandPaletteView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(spacing: 1) {
-                    ForEach(Array(results.enumerated()), id: \.offset) { pair in
-                        row(pair.element, at: pair.offset)
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: 1) {
+                        ForEach(Array(results.enumerated()), id: \.offset) { pair in
+                            row(pair.element, at: pair.offset)
+                                .id(pair.offset)
+                        }
+                    }
+                    .padding(6)
+                }
+                // The keyboard walks the list faster than the list scrolls itself: arrowing past
+                // the fold used to select a row that was runnable and invisible, so ⏎ fired a
+                // command the user could not read. Follow the highlight instead.
+                .onChange(of: selected) { _, index in
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        proxy.scrollTo(index, anchor: .center)
                     }
                 }
-                .padding(6)
             }
         }
     }

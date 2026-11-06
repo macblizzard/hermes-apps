@@ -44,7 +44,7 @@ struct ConversationPane: View {
             if model.selectedSessionID == nil {
                 ConversationEmptyState(model: model, store: store)
             } else {
-                TranscriptScroll(model: model)
+                TranscriptScroll(model: model, findRequest: store.findRequest)
             }
 
             ApprovalInbox(model: model, store: store)

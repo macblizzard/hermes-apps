@@ -30,6 +30,13 @@ final class WorkspaceStore: ObservableObject {
 
     @Published var isPairSheetPresented = false
     @Published var isPalettePresented = false
+    /// Bumped when the conversation header's magnifier asks for find-in-conversation.
+    ///
+    /// `TranscriptScroll` owns the search field and its matches — they are a reading tool, not app
+    /// state — so this is a request counter, not a boolean: a second press has to re-open and
+    /// re-focus a search that is already up, which a Bool could not express. ⌘F stays the
+    /// keyboard door; the magnifier is the discoverable one.
+    @Published private(set) var findRequest = 0
     /// The bot whose settings sheet is open; `nil` closes it. The bot list's context menu, the
     /// conversation's menu and the Settings window's Bots tab all set this, so there is one
     /// sheet and one owner.
@@ -136,6 +143,9 @@ final class WorkspaceStore: ObservableObject {
     func loadBots() async {
         await model.loadBots()
         await loadBotIcons()
+        // Third line of every row. Cached per bot, so a second call is free and a bot that has
+        // already answered is not asked again.
+        await model.loadBotPreviews()
     }
 
     /// Switch the workspace to another bot: its one conversation is resumed, and the composer
@@ -391,6 +401,10 @@ final class WorkspaceStore: ObservableObject {
     func closePalette() { isPalettePresented = false }
     /// ⌘K, ⌘K again: the palette is an overlay now, so the same key both raises and drops it.
     func togglePalette() { isPalettePresented.toggle() }
+
+    /// Ask the transcript for its search field. The same door ⌘F opens, reachable with the mouse
+    /// from the header's magnifier — which used to raise the palette instead.
+    func openFindInChat() { findRequest += 1 }
 
     /// The live catalogue. Disabled entries are shown but cannot run: a palette that hides
     /// half its verbs is harder to learn than one that explains why a verb is unavailable.
