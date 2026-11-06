@@ -103,32 +103,54 @@ def _newest_session(conn: sqlite3.Connection) -> Optional[str]:
     return str(row[0]) if row else None
 
 
+def _message_in(conn: sqlite3.Connection, session: str) -> Optional[tuple]:
+    """The newest qualifying message of one session, as a raw row."""
+    return conn.execute(
+        "SELECT role, content, timestamp FROM messages "
+        "WHERE session_id = ? AND role IN ('user', 'assistant') "
+        "AND content IS NOT NULL AND TRIM(content) <> '' "
+        "ORDER BY timestamp DESC, id DESC LIMIT 1",
+        (session,),
+    ).fetchone()
+
+
 def _last_message(db_path: Path, session_id: Optional[str]) -> Optional[dict]:
-    """The newest user/assistant message, preferring the bot's known conversation."""
+    """The newest user/assistant message of the bot's conversation.
+
+    Both candidates are checked and the later one wins: the session the app stored (its endless
+    conversation, normally) *and* the profile's most recently active session with a message in it.
+    A stored pointer can be stale — it survives a reset conversation, and another device may have
+    written a pointer this one has not seen — and answering from it alone showed a row that was
+    older than the transcript the user was looking at.
+    """
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
     try:
-        session = session_id
-        if session:
-            exists = conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session,)).fetchone()
-            if not exists:
-                session = None
-        if not session:
-            session = _newest_session(conn)
-        if not session:
+        rows = []
+        if session_id:
+            exists = conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if exists:
+                row = _message_in(conn, session_id)
+                if row:
+                    rows.append(row)
+        newest = _newest_session(conn)
+        if newest and newest != session_id:
+            row = _message_in(conn, newest)
+            if row:
+                rows.append(row)
+        if not rows:
             return None
-        row = conn.execute(
-            "SELECT role, content, timestamp FROM messages "
-            "WHERE session_id = ? AND role IN ('user', 'assistant') "
-            "AND content IS NOT NULL AND TRIM(content) <> '' "
-            "ORDER BY timestamp DESC, id DESC LIMIT 1",
-            (session,),
-        ).fetchone()
-        if not row:
-            return None
-        text = _first_line(row[1])
+
+        def stamp(row) -> float:
+            try:
+                return float(row[2] or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        role, content, at = max(rows, key=stamp)
+        text = _first_line(content)
         if not text:
             return None
-        return {"text": text, "role": str(row[0]), "at": row[2]}
+        return {"text": text, "role": str(role), "at": at}
     finally:
         conn.close()
 
