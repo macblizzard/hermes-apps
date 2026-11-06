@@ -1,4 +1,5 @@
 import SwiftUI
+import HermesKit
 import HermesRender
 import OpenBotUI
 
@@ -62,6 +63,9 @@ private struct MobileMarkdownBlock: View {
         case .code(_, let body, _):
             codeBlock(body)
 
+        case .table(let table):
+            MobileMarkdownTable(table: table)
+
         case .quote(let text):
             HStack(alignment: .top, spacing: 10) {
                 Rectangle()
@@ -85,28 +89,7 @@ private struct MobileMarkdownBlock: View {
                         weight: Font.Weight = .regular,
                         size: CGFloat? = nil,
                         color: Color = Tokens.textSecondary) -> Text {
-        let pointSize = size ?? bodySize
-        var output = Text(verbatim: "")
-        for span in InlineMarkdown.spans(source) {
-            var piece = Text(span.text)
-            if span.styles.contains(.code) {
-                piece = piece
-                    .font(.system(.subheadline, design: .monospaced))
-                    .foregroundColor(Tokens.accentText)
-            } else {
-                piece = piece
-                    .font(TypeScale.font(pointSize, weight: weight))
-                    .foregroundColor(color)
-            }
-            if span.styles.contains(.strong) { piece = piece.bold() }
-            if span.styles.contains(.emphasis) { piece = piece.italic() }
-            if span.styles.contains(.strikethrough) { piece = piece.strikethrough() }
-            if span.link != nil {
-                piece = piece.foregroundColor(Tokens.accentText).underline()
-            }
-            output = output + piece
-        }
-        return output
+        mobileInlineText(source, size: size ?? bodySize, weight: weight, color: color)
     }
 
     // MARK: Code
@@ -130,6 +113,131 @@ private struct MobileMarkdownBlock: View {
             RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous)
                 .strokeBorder(Tokens.borderStrong, lineWidth: 1)
         )
+    }
+}
+
+// MARK: - Inline runs
+
+/// Inline markdown as concatenated `Text` runs, the one builder the message body
+/// and its tables share so a cell is styled exactly like a sentence.
+private func mobileInlineText(_ source: String,
+                              size: CGFloat,
+                              weight: Font.Weight = .regular,
+                              color: Color = Tokens.textSecondary) -> Text {
+    var output = Text(verbatim: "")
+    for span in InlineMarkdown.spans(source) {
+        var piece = Text(span.text)
+        if span.styles.contains(.code) {
+            piece = piece
+                .font(.system(.subheadline, design: .monospaced))
+                .foregroundColor(Tokens.accentText)
+        } else {
+            piece = piece
+                .font(TypeScale.font(size, weight: weight))
+                .foregroundColor(color)
+        }
+        if span.styles.contains(.strong) { piece = piece.bold() }
+        if span.styles.contains(.emphasis) { piece = piece.italic() }
+        if span.styles.contains(.strikethrough) { piece = piece.strikethrough() }
+        if span.link != nil {
+            piece = piece.foregroundColor(Tokens.accentText).underline()
+        }
+        output = output + piece
+    }
+    return output
+}
+
+// MARK: - Tables
+
+/// A GitHub-style pipe table drawn as a real grid.
+///
+/// The parser (`MarkdownTableParser`) has already decided the cells; this view is
+/// only geometry: header in semibold on the surface colour, one-pixel separators,
+/// cells that wrap instead of truncating, and a horizontal scroll when the
+/// columns are wider than the bubble.
+private struct MobileMarkdownTable: View {
+    let table: MarkdownTable
+
+    private var bodySize: CGFloat { TypeScale.chatBody }
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                row(table.header, isHeader: true)
+                ForEach(Array(table.rows.enumerated()), id: \.offset) { _, cells in
+                    Hairline(color: Tokens.borderGrouped)
+                    row(cells, isHeader: false)
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .clipShape(RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous)
+                    .strokeBorder(Tokens.borderGrouped, lineWidth: 1)
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(table.plainText)
+    }
+
+    private func row(_ cells: [String], isHeader: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { column, cell in
+                if column > 0 {
+                    Hairline(.vertical, color: Tokens.borderGrouped)
+                }
+                mobileInlineText(cell,
+                                 size: bodySize,
+                                 weight: isHeader ? .semibold : .regular,
+                                 color: isHeader ? Tokens.textPrimary : Tokens.textSecondary)
+                    .lineSpacing(2)
+                    .multilineTextAlignment(textAlignment(for: column))
+                    .frame(width: width(for: column), alignment: alignment(for: column))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 7)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isHeader ? Tokens.surface : Color.clear)
+    }
+
+    // MARK: Column metrics
+
+    /// A width estimated from the longest cell in the column, clamped so a short
+    /// column is not cramped and a long one wraps at a readable measure. Exact
+    /// measurement would need a `GeometryReader` per cell and would not change the
+    /// result the eye reads.
+    private func width(for column: Int) -> CGFloat {
+        var longest = column < table.header.count ? table.header[column].count : 0
+        for cells in table.rows where column < cells.count {
+            longest = max(longest, cells[column].count)
+        }
+        let estimate = CGFloat(longest) * 8.2 + 4
+        return min(240, max(64, estimate))
+    }
+
+    private func alignment(for column: Int) -> Alignment {
+        switch alignmentValue(for: column) {
+        case .center: return .center
+        case .trailing: return .trailing
+        default: return .leading
+        }
+    }
+
+    private func textAlignment(for column: Int) -> TextAlignment {
+        switch alignmentValue(for: column) {
+        case .center: return .center
+        case .trailing: return .trailing
+        default: return .leading
+        }
+    }
+
+    private func alignmentValue(for column: Int) -> MarkdownTable.Alignment {
+        guard column < table.alignments.count else { return .none }
+        return table.alignments[column]
     }
 }
 

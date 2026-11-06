@@ -387,12 +387,15 @@ struct BotListScreen: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         if app.isPaired {
-            ToolbarItem(placement: .topBarLeading) {
+            // Top-right, opposite the title: the leading corner is where iOS puts Back on the
+            // next screen, and a filter sitting there reads like navigation.
+            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Toggle("Show hidden bots", isOn: $showHidden)
                 } label: {
                     Image(systemName: "line.3.horizontal.decrease.circle")
                 }
+                .accessibilityLabel("Bot list filters")
             }
         }
         if !app.isPaired {

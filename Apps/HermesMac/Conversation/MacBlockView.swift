@@ -1,3 +1,4 @@
+import HermesKit
 import HermesRender
 import OpenBotUI
 import SwiftUI
@@ -54,6 +55,8 @@ struct MacBlockView: View {
             .fixedSize(horizontal: false, vertical: true)
         case .code(let language, let body, let closed):
             codeBlock(language: language, body: body, closed: closed)
+        case .table(let table):
+            MacTableBlock(table: table, metrics: metrics)
         case .rule:
             Hairline(color: Tokens.borderStrong)
                 .padding(.vertical, 4)
@@ -116,6 +119,90 @@ struct MacBlockView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(body, forType: .string)
         #endif
+    }
+}
+
+// MARK: - Tables
+
+/// The same grid the phone draws, at the desktop's type size.
+///
+/// The cells come from `MarkdownTableParser` in `HermesKit`, so both shells read a
+/// pipe table identically; only the metrics differ.
+private struct MacTableBlock: View {
+    let table: MarkdownTable
+    var metrics: ChatTextMetrics
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 0) {
+                row(table.header, isHeader: true)
+                ForEach(Array(table.rows.enumerated()), id: \.offset) { _, cells in
+                    Hairline(color: Tokens.borderGrouped)
+                    row(cells, isHeader: false)
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .clipShape(RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous)
+                    .strokeBorder(Tokens.borderGrouped, lineWidth: 1)
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(table.plainText)
+    }
+
+    private func row(_ cells: [String], isHeader: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { column, cell in
+                if column > 0 {
+                    Hairline(.vertical, color: Tokens.borderGrouped)
+                }
+                MacMarkdownText(attributed: InlineMarkdown.attributedString(cell),
+                                size: metrics.bodySize,
+                                weight: isHeader ? .semibold : .regular,
+                                color: isHeader ? Tokens.textPrimary : Tokens.textSecondary,
+                                codeSize: metrics.codeSize,
+                                lineSpacing: 2)
+                    .multilineTextAlignment(textAlignment(for: column))
+                    .frame(width: width(for: column), alignment: alignment(for: column))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isHeader ? Tokens.surface : Color.clear)
+    }
+
+    private func width(for column: Int) -> CGFloat {
+        var longest = column < table.header.count ? table.header[column].count : 0
+        for cells in table.rows where column < cells.count {
+            longest = max(longest, cells[column].count)
+        }
+        let estimate = CGFloat(longest) * (metrics.bodySize * 0.52) + 4
+        return min(metrics.bodySize * 18, max(metrics.bodySize * 4.5, estimate))
+    }
+
+    private func alignment(for column: Int) -> Alignment {
+        switch alignmentValue(for: column) {
+        case .center: return .center
+        case .trailing: return .trailing
+        default: return .leading
+        }
+    }
+
+    private func textAlignment(for column: Int) -> TextAlignment {
+        switch alignmentValue(for: column) {
+        case .center: return .center
+        case .trailing: return .trailing
+        default: return .leading
+        }
+    }
+
+    private func alignmentValue(for column: Int) -> MarkdownTable.Alignment {
+        guard column < table.alignments.count else { return .none }
+        return table.alignments[column]
     }
 }
 
