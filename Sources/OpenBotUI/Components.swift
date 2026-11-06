@@ -39,6 +39,8 @@ public enum TypeScale {
     /// Section captions and the smallest meta line. `--openbot-text-*` starts at 12, so
     /// 10 and 11 are the two label steps the desktop uses below it.
     public static let caption: CGFloat = 10
+    /// Glyphs and the smallest secondary text; nothing in the app should be smaller.
+    public static let micro: CGFloat = 9
     public static let label: CGFloat = 11
 
     public static let sm: CGFloat = Tokens.textSM

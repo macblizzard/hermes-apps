@@ -84,6 +84,16 @@ public enum Geometry {
     public static let conversationMin: CGFloat = 424     // CONVERSATION_MIN_WIDTH
     public static let contextPanel: CGFloat = 236
     public static let conversationMeasure: CGFloat = 640
+    /// One inset for the conversation column: header, transcript, approval cards, composer and
+    /// error strips all start here, so their left edges cannot drift apart.
+    public static let readingInset: CGFloat = 24
+    /// One inset for the bot panel: its header, rows, empty states and host chip agree.
+    public static let sidebarInset: CGFloat = 12
+    /// The window's own rounded clip, and the floating palette's.
+    public static let radiusWindow: CGFloat = 13
+    public static let radiusPalette: CGFloat = 14
+    /// The divider between the bot panel and the conversation (hit area, not visual width).
+    public static let paneDivider: CGFloat = 7
 }
 
 // MARK: - Helpers
