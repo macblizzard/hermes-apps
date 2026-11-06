@@ -44,21 +44,9 @@ struct TranscriptScroll: View {
 
     private let bottomID = "transcript-bottom"
 
-    /// How far the end of the transcript may sit below the fold before the way back down shows.
-    /// At the true end the sentinel's bottom *is* the fold (the 10 pt of breathing room is inside
-    /// the stack above it), so 20 pt is pure hysteresis: a wheel click or a trackpad nudge must
-    /// not summon the control, and it must not flicker while a reply streams in.
-    private let revealGap: CGFloat = 20
-
-    /// Where the bottom edge of the *visible* transcript sits, in window coordinates. Measured
-    /// rather than taken from a `GeometryReader` height so that both ends of the comparison come
-    /// from the same space — on-screen y, whatever the scroll offset — and so a window resize
-    /// re-measures it for free.
-    @State private var foldEdge: CGFloat = 0
-
-    /// True while new content may pull the transcript down. One measurement feeds both this and
-    /// the floating control, so the auto-scroll and the button can never disagree about whether
-    /// the newest message is on screen.
+    /// True while new content may pull the transcript down. The end sentinel's appearance feeds
+    /// both this and the floating control, so the auto-scroll and the button can never disagree
+    /// about whether the newest message is on screen.
     @State private var followsBottom = true
 
     var body: some View {
@@ -102,8 +90,7 @@ struct TranscriptScroll: View {
             // where the eye goes looking for it.
             .overlay(alignment: .bottom) { foot(proxy) }
             .onAppear { proxy.scrollTo(bottomID, anchor: .bottom) }
-            .onPreferenceChange(FoldEdgeKey.self) { foldEdge = $0 }
-            .onPreferenceChange(BottomEdgeKey.self) { syncFollowState(edgeBottom: $0) }
+
             .onChange(of: model.transcript.count) { _, _ in follow(proxy) }
             .onChange(of: model.streamingText) { _, _ in follow(proxy) }
             .onChange(of: model.isStreaming) { _, _ in follow(proxy) }
@@ -160,29 +147,17 @@ struct TranscriptScroll: View {
         Color.clear
             .frame(height: 1)
             .id(bottomID)
-            .background(
-                GeometryReader { edge in
-                    Color.clear.preference(key: BottomEdgeKey.self,
-                                           value: edge.frame(in: .global).maxY)
-                }
-            )
+            // The verdict the floating button depends on, taken from whether this marker is on
+            // screen at all. It used to be measured — the sentinel's bottom edge against the
+            // viewport's — and that pair never disagreed after the first layout, so the button
+            // stayed hidden while the transcript sat a screen above its own end.
+            .onAppear { followsBottom = true }
+            .onDisappear { followsBottom = false }
     }
 
-    /// The foot of the viewport: the fold the threshold is measured against, and the control that
-    /// returns to the newest message. Both ride in one stack, so the two measurements come out of
-    /// the same space and the comparison is a plain subtraction.
+    /// The foot of the viewport: the control that returns to the newest message.
     private func foot(_ proxy: ScrollViewProxy) -> some View {
         ZStack(alignment: .bottom) {
-            Color.clear
-                .frame(height: 1)
-                .allowsHitTesting(false)
-                .background(
-                    GeometryReader { fold in
-                        Color.clear.preference(key: FoldEdgeKey.self,
-                                               value: fold.frame(in: .global).maxY)
-                    }
-                )
-
             Group {
                 // Hidden while the search row is up: the search owns the scroll position then,
                 // and this would compete with the chevrons that step through matches.
@@ -215,19 +190,6 @@ struct TranscriptScroll: View {
         proxy.scrollTo(bottomID, anchor: .bottom)
     }
 
-    /// The one place `followsBottom` changes — and it writes only when the verdict flips.
-    ///
-    /// Pinned to the bottom, the sentinel does not move relative to the fold, so streaming raises
-    /// no event at all. Scrolled up, it moves with every token; this guard keeps those events from
-    /// re-rendering the transcript on each one.
-    ///
-    /// The comparison is sentinel-against-fold, both in window coordinates: the verdict is a
-    /// plain on-screen fact, untouched by how SwiftUI resolves scroll offsets internally.
-    private func syncFollowState(edgeBottom: CGFloat) {
-        guard foldEdge > 0 else { return }
-        let shouldFollow = edgeBottom - foldEdge <= revealGap
-        if shouldFollow != followsBottom { followsBottom = shouldFollow }
-    }
 
     /// The way back down: a circle centred on the column, floating just above the composer, with
     /// the same quiet surface as the composer's own controls. Drawn only when the measurement
@@ -343,24 +305,6 @@ struct TranscriptScroll: View {
     }
 }
 
-/// Where the end of the transcript currently sits, in window coordinates.
-/// One writer, so the last value wins; the reader thresholds it and ignores everything else.
-private struct BottomEdgeKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-/// The bottom edge of the visible transcript, in window coordinates — the line the floating
-/// control sits on. Constant except when the window or the pane changes size; the pair is what
-/// turns "is the end below the fold" into a subtraction.
-private struct FoldEdgeKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
 
 /// The assistant's turn while it is still arriving.
 ///

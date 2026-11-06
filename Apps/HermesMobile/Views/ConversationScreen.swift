@@ -29,6 +29,11 @@ struct ConversationScreen: View {
     @State private var keyboardScreenSize: CGSize = .zero
     @State private var keyboardScrollTask: Task<Void, Never>?
     @State private var isDraggingTranscript = false
+
+    /// Whether the transcript's own end is on screen. Fed by the bottom sentinel appearing and
+    /// disappearing, so it is a fact about the scroll position rather than a guess — it decides
+    /// both whether new tokens may pull the view down and whether the way back is offered.
+    @State private var isAtBottom = true
     @State private var showAttachmentMenu = false
     @State private var attachmentSource: AttachmentSource?
 
@@ -317,6 +322,10 @@ struct ConversationScreen: View {
                     .padding(.bottom, 20)
             }
             .scrollDismissesKeyboard(.interactively)
+            // The way back to the newest message, on the same rule as the desktop's: it appears
+            // only while the transcript's end is off screen.
+            .overlay(alignment: .bottomTrailing) { scrollToBottomControl(proxy) }
+            .animation(.easeOut(duration: 0.18), value: isAtBottom)
             .simultaneousGesture(DragGesture(minimumDistance: 5)
                 .onChanged { _ in
                     isDraggingTranscript = true
@@ -332,16 +341,22 @@ struct ConversationScreen: View {
                 isDraggingTranscript = false
             }
             .onChange(of: model.transcript.count) {
-                scroll(proxy, animated: true)
+                // A message the user just sent is a reason to go down even from mid-history;
+                // anything else follows only when the view was already at the end.
+                if model.transcript.last?.role == .user {
+                    scroll(proxy, animated: true)
+                } else {
+                    follow(proxy, animated: true)
+                }
             }
             .onChange(of: model.streamingText) {
-                scroll(proxy, animated: false)
+                follow(proxy, animated: false)
             }
             .onChange(of: model.liveTools.count) {
-                scroll(proxy, animated: false)
+                follow(proxy, animated: false)
             }
             .onChange(of: model.reasoningText) {
-                scroll(proxy, animated: false)
+                follow(proxy, animated: false)
             }
             .onChange(of: searchText) {
                 searchIndex = 0
@@ -416,6 +431,10 @@ struct ConversationScreen: View {
             Color.clear
                 .frame(height: 1)
                 .id(ConversationScreen.bottomID)
+                // On screen only when the newest message is. A lazy row's appearance is the one
+                // scroll fact a SwiftUI ScrollView gives without a preference dance.
+                .onAppear { isAtBottom = true }
+                .onDisappear { isAtBottom = false }
         }
     }
 
@@ -798,6 +817,38 @@ struct ConversationScreen: View {
             }
         } else {
             proxy.scrollTo(ConversationScreen.bottomID, anchor: .bottom)
+        }
+    }
+
+    /// Pull down only while the end was already on screen: a reader mid-history keeps their place
+    /// and gets the button instead of being dragged back by every token.
+    private func follow(_ proxy: ScrollViewProxy, animated: Bool) {
+        guard isAtBottom else { return }
+        scroll(proxy, animated: animated)
+    }
+
+    @ViewBuilder
+    private func scrollToBottomControl(_ proxy: ScrollViewProxy) -> some View {
+        if !isAtBottom {
+            Button {
+                Haptics.impact()
+                scroll(proxy, animated: true)
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Tokens.textSecondary)
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Tokens.control))
+                    .overlay(Circle().strokeBorder(Tokens.border, lineWidth: 1))
+                    .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 16)
+            .padding(.bottom, 12)
+            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            .accessibilityIdentifier("conversationScrollToBottom")
+            .accessibilityLabel("Scroll to latest message")
         }
     }
 }
