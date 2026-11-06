@@ -100,9 +100,6 @@ struct ConversationScreen: View {
                 load: { botID in try await model.modelCatalog(for: botID) },
                 conversationIsOpen: true,
                 resetConversation: { model.resetEndlessSession(for: bot.id) },
-                saveDescription: { botID, text in
-                    try await model.configureDescription(botID: botID, description: text)
-                },
                 save: { botID, option, confirmed in
                     switch try await model.configureModel(botID: botID, model: option.id,
                                                           provider: option.provider,
@@ -110,6 +107,10 @@ struct ConversationScreen: View {
                     case .applied: return .saved
                     case .confirmationRequired(let message): return .confirmationRequired(message)
                     }
+                },
+                // Memberwise order matters: `save` precedes `saveDescription` in the declaration.
+                saveDescription: { botID, text in
+                    try await model.configureDescription(botID: botID, description: text)
                 })
         }
         // A paperclip tap is a three-way choice, not a page: an action sheet, then the system
