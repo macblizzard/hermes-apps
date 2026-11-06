@@ -168,7 +168,7 @@ def create_bot_previews_router(runtime) -> APIRouter:
 
     @router.get('/previews')
     def list_previews(authorization: Optional[str] = Header(default=None)) -> dict:
-        authenticate(authorization)
+        device_id = authenticate(authorization)
         previews: dict[str, dict] = {}
         try:
             names = sorted(p.name for p in root.iterdir() if (p / 'state.db').is_file())
@@ -178,8 +178,10 @@ def create_bot_previews_router(runtime) -> APIRouter:
             payload = preview_for(profile)
             if payload:
                 previews[profile] = payload
-        runtime.audit.emit('bot_previews', method='GET', path='/v1/bots/previews',
-                           profiles=len(previews), outcome='ok')
+        # `emit` takes a fixed set of keywords and a fixed set of event names; either miss raises,
+        # and a 500 here would cost every bot its third line for the sake of a log line.
+        runtime.audit.emit('http', device_id=device_id, method='GET',
+                           path='/v1/bots/previews', outcome='ok')
         return {'previews': previews}
 
     return router
