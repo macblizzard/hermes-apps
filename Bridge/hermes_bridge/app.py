@@ -39,6 +39,7 @@ from .pairing import InvalidPublicKey, normalize_public_key
 from .proxy import GatewayProxy, LiveSessions
 from .registry import DeviceRegistry
 from .tickets import AttemptThrottle, PairingCodes, TicketStore
+from .voice import VoiceBackend, create_voice_router
 
 #: How long a minted pairing code stays usable. Two minutes is shorter than the walk from the
 #: host to a phone with the app open, and a code is single-use, loopback-minted and rate-limited,
@@ -116,6 +117,7 @@ def create_app(
     *,
     registry: Optional[DeviceRegistry] = None,
     audit: Optional[AuditLog] = None,
+    voice_backend: Optional[VoiceBackend] = None,
 ) -> FastAPI:
     cfg = config or BridgeConfig.from_env()
     cfg.validate()
@@ -141,6 +143,9 @@ def create_app(
     app = FastAPI(title="hermes-bridge", version="0.2.0", lifespan=lifespan)
     app.state.bridge = runtime
     app.include_router(create_bot_icons_router(runtime))
+    # Keys are read from the bridge EnvironmentFile at construction, never from a
+    # request; tests pass a backend with an injected transport.
+    app.include_router(create_voice_router(runtime, voice_backend))
 
     @app.middleware("http")
     async def no_store(request: Request, call_next):

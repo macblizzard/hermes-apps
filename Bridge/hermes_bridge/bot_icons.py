@@ -7,10 +7,12 @@ host's settings. Only opaque gallery IDs, not images or paths, are stored.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
+
+from .device_auth import require_device
 
 Icon = Literal['ember', 'nova', 'cobalt', 'orbit', 'moss', 'dusk']
 
@@ -25,22 +27,19 @@ def create_bot_icons_router(runtime) -> APIRouter:
         conn.execute('CREATE TABLE IF NOT EXISTS bot_icons (bot_id TEXT PRIMARY KEY, icon TEXT NOT NULL)')
         conn.commit()
 
-    def authenticate(authorization: str | None) -> None:
-        parts = (authorization or '').split()
-        token = parts[1] if len(parts) == 2 and parts[0].lower() == 'bearer' else ''
-        device_id = runtime.tickets.redeem(token)
-        if not device_id or not runtime.registry.is_active(device_id):
-            raise HTTPException(status_code=401, detail='invalid, expired or revoked ticket')
+    def authenticate(authorization) -> str:
+        return require_device(runtime, authorization)
 
     @router.get('')
-    def list_icons(authorization: str | None = Header(default=None)) -> dict:
+    def list_icons(authorization: Optional[str] = Header(default=None)) -> dict:
         authenticate(authorization)
         with runtime.registry._connect() as conn:
             rows = conn.execute('SELECT bot_id, icon FROM bot_icons ORDER BY bot_id').fetchall()
         return {'icons': {row['bot_id']: row['icon'] for row in rows}}
 
     @router.put('/{bot_id}')
-    def set_icon(bot_id: str, body: IconChange, authorization: str | None = Header(default=None)) -> dict:
+    def set_icon(bot_id: str, body: IconChange,
+                 authorization: Optional[str] = Header(default=None)) -> dict:
         authenticate(authorization)
         if not bot_id.strip() or len(bot_id) > 256:
             raise HTTPException(status_code=422, detail='invalid bot id')
