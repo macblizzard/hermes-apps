@@ -58,10 +58,13 @@ struct BotRail: View {
             Haptics.selection()
             store.selectBot(bot.id)
         } label: {
-            Avatar(bot.displayName,
-                   size: .medium,
-                   presence: presence(for: bot),
-                   initials: bot.avatarInitials)
+            Group {
+                if let icon = store.botIcons[bot.id] {
+                    BotIconPortrait(icon, size: 34, isWorking: bot.id == model.selectedBotID && model.isStreaming)
+                } else {
+                    Avatar(bot.displayName, size: .medium, presence: presence(for: bot), initials: bot.avatarInitials)
+                }
+            }
                 .frame(width: 38, height: 38)
                 .background(
                     RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous)

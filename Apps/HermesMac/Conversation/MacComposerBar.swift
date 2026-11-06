@@ -1,3 +1,4 @@
+import AppKit
 import HermesAppKit
 import HermesKit
 import OpenBotUI
@@ -69,9 +70,13 @@ struct MacComposerBar: View {
             HStack(spacing: 6) {
                 ForEach(model.pendingAttachments) { attachment in
                     HStack(spacing: 5) {
-                        Image(systemName: attachment.isImage ? "photo" : "doc")
-                            .font(.system(size: 9))
-                            .foregroundStyle(Tokens.textSecondary)
+                        if attachment.isImage, let image = NSImage(data: attachment.data) {
+                            Image(nsImage: image).resizable().scaledToFill()
+                                .frame(width: 26, height: 26).clipped().cornerRadius(4)
+                        } else {
+                            Image(systemName: attachment.isImage ? "photo" : "doc")
+                                .font(.system(size: 9)).foregroundStyle(Tokens.textSecondary)
+                        }
 
                         Text(attachment.name)
                             .font(TypeScale.font(TypeScale.caption))

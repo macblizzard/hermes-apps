@@ -11,19 +11,65 @@ import SwiftUI
 struct TranscriptScroll: View {
     @ObservedObject var model: AppModel
 
+    @State private var searching = false
+    @State private var query = ""
+    @State private var matchIndex = 0
+    @FocusState private var searchFocused: Bool
+    private let streamingID = "conversation-streaming-search"
+
+    private var matches: [String] {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        var ids = model.transcript.filter { $0.text.localizedCaseInsensitiveContains(query) }.map(\.id)
+        if model.isStreaming && model.streamingText.localizedCaseInsensitiveContains(query) { ids.append(streamingID) }
+        return ids
+    }
+
+    private var selectedMatch: String? {
+        guard searching, matches.indices.contains(matchIndex) else { return nil }
+        return matches[matchIndex]
+    }
+
+    private func moveMatch(_ direction: Int) {
+        guard !matches.isEmpty else { return }
+        matchIndex = (min(matchIndex, matches.count - 1) + direction + matches.count) % matches.count
+    }
+
     private let bottomID = "transcript-bottom"
 
     var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                if searching {
+                    TextField("Search messages", text: $query).focused($searchFocused)
+                        .accessibilityIdentifier("conversationSearchField")
+                    Text(query.isEmpty ? "" : matches.isEmpty ? "No matches" : "\(min(matchIndex + 1, matches.count)) of \(matches.count)")
+                        .font(.caption)
+                    Button { moveMatch(-1) } label: { Image(systemName: "chevron.up") }
+                        .disabled(matches.isEmpty).accessibilityLabel("Previous search result")
+                    Button { moveMatch(1) } label: { Image(systemName: "chevron.down") }
+                        .disabled(matches.isEmpty).accessibilityLabel("Next search result")
+                    Button("Done") { searching = false; query = ""; matchIndex = 0 }
+                } else {
+                    Spacer()
+                    Button { searching = true; searchFocused = true } label: { Image(systemName: "magnifyingglass") }
+                        .keyboardShortcut("f", modifiers: .command)
+                        .help("Search conversation")
+                }
+            }.padding(.horizontal, 24).padding(.top, 8)
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: true) {
                 LazyVStack(alignment: .center, spacing: 18) {
                     ForEach(model.transcript) { entry in
-                        TranscriptRowView(entry: entry)
+                        TranscriptRowView(entry: entry, host: model.hostName, bot: model.selectedBotID ?? "", session: model.selectedSessionID)
+                            .id(entry.id)
+                            .background(selectedMatch == entry.id ? Color.accentColor.opacity(0.16) : Color.clear)
                             .frame(maxWidth: Geometry.conversationMeasure, alignment: .leading)
                     }
 
                     if model.isStreaming {
                         StreamingAssistantBubble(text: model.streamingText)
+                            .id(streamingID)
+                            .background(selectedMatch == streamingID ? Color.accentColor.opacity(0.16) : Color.clear)
                             .frame(maxWidth: Geometry.conversationMeasure, alignment: .leading)
                             .transition(.opacity)
                     }
@@ -38,12 +84,21 @@ struct TranscriptScroll: View {
                 .frame(maxWidth: .infinity)
             }
             .onAppear { proxy.scrollTo(bottomID, anchor: .bottom) }
-            .onChange(of: model.transcript.count) { _, _ in scroll(proxy) }
-            .onChange(of: model.streamingText) { _, _ in scroll(proxy) }
-            .onChange(of: model.isStreaming) { _, _ in scroll(proxy) }
+            .onChange(of: model.transcript.count) { _, _ in if !searching { scroll(proxy) } }
+            .onChange(of: model.streamingText) { _, _ in if !searching { scroll(proxy) } }
+            .onChange(of: model.isStreaming) { _, _ in if !searching { scroll(proxy) } }
             .onChange(of: model.selectedSessionID) { _, _ in
+                query = ""; matchIndex = 0
                 proxy.scrollTo(bottomID, anchor: .bottom)
             }
+            .onChange(of: query) { _, _ in matchIndex = 0; if let id = selectedMatch { proxy.scrollTo(id, anchor: .center) } }
+            .onChange(of: matchIndex) { _, _ in if let id = selectedMatch { proxy.scrollTo(id, anchor: .center) } }
+            .onChange(of: matches) { _, newMatches in
+                guard searching else { return }
+                matchIndex = min(matchIndex, max(0, newMatches.count - 1))
+                if let id = selectedMatch { proxy.scrollTo(id, anchor: .center) }
+            }
+        }
         }
     }
 

@@ -21,6 +21,7 @@ struct MacBotSettingsSheet: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    @State private var showingIconPicker = false
     @State private var catalog: ModelCatalog?
     @State private var error: String?
     @State private var busy = false
@@ -57,6 +58,12 @@ struct MacBotSettingsSheet: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
+                    Button("Choose bot icon…") { showingIconPicker = true }
+                        .disabled(store.pairing == nil || store.pairing?.isTicketOnly == true)
+                    if let iconError = store.botIconsError {
+                        Text("Could not refresh bot icons: \(iconError)")
+                            .font(TypeScale.font(TypeScale.caption)).foregroundStyle(Tokens.danger)
+                    }
                     descriptionSection
 
                     if let catalog {
@@ -72,6 +79,9 @@ struct MacBotSettingsSheet: View {
         .frame(width: 520, height: 560)
         .background(Tokens.canvas)
         .task { await refresh() }
+        .sheet(isPresented: $showingIconPicker) {
+            MacBotIconPicker(bot: bot, store: store)
+        }
         .alert("Confirm model", isPresented: pendingBinding) {
             Button("Cancel", role: .cancel) { pending = nil }
             Button("Confirm") {

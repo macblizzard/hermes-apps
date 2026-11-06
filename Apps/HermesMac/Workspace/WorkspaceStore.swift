@@ -28,6 +28,9 @@ final class WorkspaceStore: ObservableObject {
     /// The bot whose settings sheet is open; `nil` closes it. Both the sidebar's context menu and
     /// the conversation's menu set this, so there is one sheet and one owner.
     @Published var botSettingsBot: Bot? = nil
+    @Published private(set) var botIcons: [String: BotIcon] = [:]
+    @Published private(set) var botIconsError: String?
+    private var iconGeneration = 0
     /// The open bot's own profile default, for the header chip.
     ///
     /// `AppModel.modelLabel` is read once per connect and per endless-session open; the Mac opens
@@ -126,6 +129,7 @@ final class WorkspaceStore: ObservableObject {
     func loadBots() async {
         await model.loadBots()
         await model.loadSessions()
+        await loadBotIcons()
     }
 
     /// Switch the workspace to another bot: sessions and conversation follow, and the
@@ -165,6 +169,7 @@ final class WorkspaceStore: ObservableObject {
         await model.start()
         if model.connection.isLive {
             startLatencyLoop()
+            await loadBotIcons()
             await openFirstSessionIfNeeded()
         }
     }
@@ -174,10 +179,12 @@ final class WorkspaceStore: ObservableObject {
         await model.retryConnection()
         if model.connection.isLive {
             startLatencyLoop()
+            await loadBotIcons()
         }
     }
 
     func disconnect() async {
+        clearBotIcons()
         stopLatencyLoop()
         await model.stop()
     }
@@ -188,6 +195,7 @@ final class WorkspaceStore: ObservableObject {
         let address = try PairingAddress.parse(urlText, deviceID: deviceID, token: token)
         pairingStore.save(address)
 
+        clearBotIcons()
         stopLatencyLoop()
         pairing = address
         model = WorkspaceStore.makeModel(for: address)
@@ -201,6 +209,7 @@ final class WorkspaceStore: ObservableObject {
     var pairingIsSessionOnly: Bool { !pairingStore.persisted && pairing != nil }
 
     func unpair() async {
+        clearBotIcons()
         stopLatencyLoop()
         await model.stop()
         pairingStore.clear()
@@ -208,6 +217,41 @@ final class WorkspaceStore: ObservableObject {
         model = AppModel(client: UnpairedGatewayClient(), hostName: "hermes")
         drafts.removeAll()
         connectAttempted = false
+    }
+
+    private func clearBotIcons() {
+        iconGeneration += 1
+        botIcons = [:]
+        botIconsError = nil
+    }
+
+    func loadBotIcons() async {
+        guard let address = pairing, !address.isTicketOnly else { return }
+        iconGeneration += 1
+        let generation = iconGeneration
+        do {
+            let icons = try await MacBotIconService(address: address).load()
+            guard generation == iconGeneration, pairing == address else { return }
+            botIcons = icons
+            botIconsError = nil
+        } catch {
+            guard generation == iconGeneration, pairing == address else { return }
+            botIconsError = error.localizedDescription
+        }
+    }
+
+    func saveBotIcon(botID: String, icon: BotIcon?) async throws {
+        guard let address = pairing, !address.isTicketOnly else {
+            throw MacBotIconService.Failure.devicePairingRequired
+        }
+        iconGeneration += 1
+        let generation = iconGeneration
+        try await MacBotIconService(address: address).save(botID: botID, icon: icon)
+        guard generation == iconGeneration, pairing == address else { return }
+        await loadBotIcons()
+        if let error = botIconsError {
+            throw MacBotIconService.Failure.refresh(error)
+        }
     }
 
     // MARK: Sessions

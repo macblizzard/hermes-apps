@@ -63,6 +63,19 @@ targets:
         COMBINE_HIDPI_IMAGES: "YES"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 
+  HermesMacUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: Tests/HermesMacUITests
+    dependencies:
+      - target: HermesMac
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.corvus.hermes.mac.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: HermesMac
+
   HermesMobile:
     type: application
     platform: iOS
@@ -108,8 +121,13 @@ schemes:
     build:
       targets:
         HermesMac: all
+        HermesMacUITests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - HermesMacUITests
   HermesMobile:
     build:
       targets:

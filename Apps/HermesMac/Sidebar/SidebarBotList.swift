@@ -112,10 +112,11 @@ struct SidebarBotList: View {
             store.selectBot(bot.id)
         } label: {
             HStack(alignment: .center, spacing: 8) {
-                Avatar(bot.displayName,
-                       size: .small,
-                       presence: presence(for: bot),
-                       initials: bot.avatarInitials)
+                if let icon = store.botIcons[bot.id] {
+                    BotIconPortrait(icon, size: 26, isWorking: bot.id == model.selectedBotID && model.isStreaming)
+                } else {
+                    Avatar(bot.displayName, size: .small, presence: presence(for: bot), initials: bot.avatarInitials)
+                }
 
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 4) {
@@ -220,7 +221,7 @@ struct SidebarBotList: View {
     }
 
     private var emptyRow: some View {
-        Text(model.botsLoading ? "Asking the host which bots it serves…" : "No bots found on this host.")
+        Text(model.botsLoading ? "Asking the host which bots it serves…" : (hiddenBots.isEmpty ? "No bots found on this host." : "All bots are hidden. Use the filter to show them."))
             .font(TypeScale.font(TypeScale.caption))
             .foregroundStyle(Tokens.textDim)
             .padding(.horizontal, 8)

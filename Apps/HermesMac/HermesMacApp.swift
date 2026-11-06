@@ -25,6 +25,10 @@ struct HermesMacApp: App {
         .commands {
             WorkspaceCommands(store: store)
         }
+        Window("Paired Devices", id: "paired-devices") {
+            MacDevicesView(store: store)
+        }
+        .defaultSize(width: 560, height: 440)
     }
 }
 
@@ -34,6 +38,7 @@ struct HermesMacApp: App {
 /// they are chosen (the closure), which is the only moment that has to be right.
 struct WorkspaceCommands: Commands {
     let store: WorkspaceStore
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -47,6 +52,10 @@ struct WorkspaceCommands: Commands {
                 store.isPairSheetPresented = true
             }
             .keyboardShortcut("p", modifiers: [.command, .shift])
+
+            Button("Manage Paired Devices…") {
+                openWindow(id: "paired-devices")
+            }
         }
 
         CommandMenu("Session") {

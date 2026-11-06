@@ -61,6 +61,44 @@ jobs:
           path: dist/Hermes-macOS-unsigned.zip
           if-no-files-found: error
 
+  macos-ui:
+    name: macOS UI smoke test
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Launch app and run UI smoke test
+        run: |
+          xcodebuild -project HermesApps.xcodeproj -scheme HermesMac -configuration Debug \
+            -destination 'platform=macOS' -derivedDataPath build/ui-dd \
+            -resultBundlePath build/HermesMacUI.xcresult \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" test
+      - name: Export screenshots from result bundle
+        if: always()
+        run: |
+          if [ -d build/HermesMacUI.xcresult ]; then
+            mkdir -p build/ui-attachments
+            xcrun xcresulttool export attachments --path build/HermesMacUI.xcresult \
+              --output-path build/ui-attachments
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: HermesMac-ui-xcresult
+          path: build/HermesMacUI.xcresult
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: HermesMac-ui-attachments
+          path: build/ui-attachments
+          if-no-files-found: warn
+
   ipa:
     name: Unsigned .ipa (for FlareStore)
     runs-on: macos-26

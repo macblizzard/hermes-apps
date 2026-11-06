@@ -57,7 +57,9 @@ struct MacMarkdownText: View {
                 font = font.italic()
             }
 
-            var piece = Text(slice).font(font)
+            var segment = AttributedString(slice)
+            if let url = run.link { segment.link = url }
+            var piece = Text(segment).font(font)
 
             if isLink {
                 piece = piece.foregroundColor(Tokens.accentText).underline()

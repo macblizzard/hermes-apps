@@ -1,3 +1,5 @@
+import AppKit
+import AVFoundation
 import HermesKit
 import HermesRender
 import OpenBotUI
@@ -11,8 +13,80 @@ import SwiftUI
 /// surface do.
 struct TranscriptRowView: View {
     let entry: TranscriptEntry
+    var host: String = ""
+    var bot: String = ""
+    var session: String? = nil
+    @State private var showingReactions = false
+    @State private var showingSelection = false
+    @AppStorage("mac.messageReactions.v1") private var storedReactions = "{}"
+    private static let speaker = AVSpeechSynthesizer()
+    private static let emojis = ["👍", "❤️", "😂", "😮", "😢", "🎉"]
+
+    private var reactionKey: String? {
+        guard let session else { return nil }
+        let message = entry.rowID.map { "row:\($0)" } ?? "live:\(entry.id)"
+        return [host, bot, session, message].map { "\($0.utf8.count):\($0)" }.joined()
+    }
+
+    private var reactions: [String: String] {
+        guard let data = storedReactions.data(using: .utf8),
+              let values = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return values
+    }
+
+    private func toggleReaction(_ emoji: String) {
+        guard let key = reactionKey else { return }
+        var values = reactions
+        values[key] = values[key] == emoji ? nil : emoji
+        if let data = try? JSONEncoder().encode(values), let text = String(data: data, encoding: .utf8) {
+            storedReactions = text
+        }
+    }
 
     var body: some View {
+        VStack(alignment: entry.role == .user ? .trailing : .leading, spacing: 4) {
+            content.contextMenu { messageMenu }
+            if let key = reactionKey, let emoji = reactions[key] {
+                Button(emoji) { toggleReaction(emoji) }
+                    .accessibilityLabel("Remove local reaction \(emoji)")
+            }
+        }
+        .popover(isPresented: $showingReactions) {
+            VStack {
+                Text("Reactions are local to this Mac").font(.caption)
+                HStack {
+                    ForEach(Self.emojis, id: \.self) { emoji in
+                        Button(emoji) { toggleReaction(emoji); showingReactions = false }
+                            .buttonStyle(.plain)
+                            .font(.title2)
+                            .accessibilityLabel("React with \(emoji)")
+                    }
+                }
+            }.padding()
+        }
+        .sheet(isPresented: $showingSelection) {
+            VStack(alignment: .leading) {
+                HStack { Text("Select Text").font(.headline); Spacer(); Button("Done") { showingSelection = false } }
+                ScrollView { Text(entry.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+            }.padding().frame(minWidth: 420, minHeight: 240)
+        }
+    }
+
+    @ViewBuilder private var messageMenu: some View {
+        if entry.role == .user || entry.role == .assistant {
+            Button("Select Text") { showingSelection = true }
+            Button("Read Aloud") {
+                Self.speaker.stopSpeaking(at: .immediate)
+                Self.speaker.speak(AVSpeechUtterance(string: entry.text))
+            }
+            Button("Stop Reading") { Self.speaker.stopSpeaking(at: .immediate) }
+            if reactionKey != nil { Button("Add Local Reaction…") { showingReactions = true } }
+        }
+        ShareLink(item: entry.text) { Label("Share", systemImage: "square.and.arrow.up") }
+        Button("Copy Message") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.text, forType: .string) }
+    }
+
+    @ViewBuilder private var content: some View {
         switch entry.role {
         case .user:
             userRow
