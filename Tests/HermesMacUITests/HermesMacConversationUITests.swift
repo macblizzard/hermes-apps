@@ -175,7 +175,12 @@ final class HermesMacConversationUITests: XCTestCase {
         // A hosted runner can start the app behind other windows; activation is what makes the
         // window query reliable, not `isHittable` (which depends on focus, not on existence).
         app.activate()
-        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 60), "Hermes did not open a window")
+        if !app.windows.firstMatch.waitForExistence(timeout: 30) {
+            // A missing window is either a launch-time crash (state != running) or a scene that
+            // never rendered; print both facts so the CI log answers the question.
+            XCTFail("Hermes did not open a window (state=\(app.state.rawValue))\n\(app.debugDescription.prefix(3000))")
+            return
+        }
 
         // Settle: the fixture's late reply is the last thing that changes the transcript, and
         // the search counts depend on it having landed.
