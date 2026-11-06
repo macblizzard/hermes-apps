@@ -85,24 +85,18 @@ enum UITestFixture {
     /// (`pinnedBots.<host>`, `botActivity.<host>`) point at the fixture namespace.
     @MainActor
     static func storeForLaunch(_ arguments: [String] = ProcessInfo.processInfo.arguments) -> WorkspaceStore {
-        NSLog("[uitest] storeForLaunch args=\(arguments.joined(separator: " ")) requests=\(requestsFixture(arguments))")
         guard requestsFixture(arguments) else { return WorkspaceStore() }
         if let cached = cachedStore { return cached }
 
         FixtureDefaults.reset(hostName: hostName)
-        NSLog("[uitest] step defaults reset")
         let client = FixtureGatewayClient()
         self.client = client
         isActive = true
-        NSLog("[uitest] step client built")
-        let model = AppModel(client: client, hostName: hostName)
-        NSLog("[uitest] step model built")
-        let store = WorkspaceStore(model: model,
+        let store = WorkspaceStore(model: AppModel(client: client, hostName: hostName),
                                    pairing: PairingAddress(baseURL: "wss://hermes-fixture.invalid",
                                                            deviceID: "",
                                                            token: "fixture-only"))
         cachedStore = store
-        NSLog("[uitest] step store built")
         return store
     }
 }
@@ -117,7 +111,6 @@ extension WorkspaceStore {
     /// client plus "open the first session". Idempotent here because the window may re-run
     /// `.task` when it comes back.
     func attachFixtureHostIfNeeded() async {
-        NSLog("[uitest] attachFixtureHostIfNeeded active=\(UITestFixture.isActive) attached=\(UITestFixture.didAttach)")
         guard UITestFixture.isActive, !UITestFixture.didAttach else { return }
         UITestFixture.didAttach = true
 
@@ -135,7 +128,6 @@ extension WorkspaceStore {
             model.togglePin(botID: UITestFixture.pinnedBotID)
         }
 
-        NSLog("[uitest] fixture host attached, bots=\(model.bots.count) session=\(model.selectedSessionID ?? "nil")")
         UITestFixture.deliverLateReply(on: model)
     }
 }
