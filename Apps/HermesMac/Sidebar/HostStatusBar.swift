@@ -103,6 +103,9 @@ struct HostStatusBar: View {
                     Task { await store.disconnect() }
                 }
                 Spacer(minLength: 0)
+                OpenBotIconButton("link", label: "Pair host…", size: .small) {
+                    store.isPairSheetPresented = true
+                }
                 OpenBotButton("Reconnect", kind: .secondary, size: .small) {
                     Task { await store.reconnect() }
                 }

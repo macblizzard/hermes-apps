@@ -2,13 +2,14 @@ import HermesAppKit
 import OpenBotUI
 import SwiftUI
 
-/// macOS workspace. Rail 72, session list 280 (drag 64…400, collapses under 110 to the
-/// 88 pt strip), conversation on a 640 pt measure, context panel 236 — the geometry in
-/// `Geometry`, which mirrors OpenBot's `layout-constants.ts`.
+/// macOS workspace. Bot list on the left (280 pt, drag 64…400, collapsing to an 88 pt icon
+/// strip) and the selected bot's one conversation on the right. There is no session browser,
+/// session search field, host-status block or right context panel.
 ///
 /// Launch is offline by construction: `WorkspaceStore` restores the pairing it was given
 /// last time but dials nothing, and the only calls into `connect()` are the Connect button,
-/// the palette's verb and the pair sheet's Pair press.
+/// the palette's verb and the pair sheet's Pair press. Pairing, device management and the
+/// selected bot's settings are also in the native menu bar.
 @main
 struct HermesMacApp: App {
     @StateObject private var store = WorkspaceStore()
@@ -16,7 +17,7 @@ struct HermesMacApp: App {
     var body: some Scene {
         WindowGroup("Hermes") {
             WorkspaceRoot(store: store)
-                .frame(minWidth: Geometry.serverRailMacOS + Geometry.sidebarMin + Geometry.conversationMin,
+                .frame(minWidth: Geometry.sidebarMin + Geometry.conversationMin,
                        minHeight: 560)
                 .preferredColorScheme(.dark)
         }
@@ -42,12 +43,6 @@ struct WorkspaceCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New Session") {
-                store.newSession()
-            }
-            .keyboardShortcut("n", modifiers: .command)
-            .disabled(!store.model.connection.isLive)
-
             Button("Pair Host…") {
                 store.isPairSheetPresented = true
             }
@@ -58,12 +53,37 @@ struct WorkspaceCommands: Commands {
             }
         }
 
+        CommandMenu("Bot") {
+            Button("Bot Settings…") {
+                if let bot = store.selectedBot {
+                    store.openBotSettings(bot)
+                }
+            }
+            .keyboardShortcut(",", modifiers: .command)
+            .disabled(store.selectedBot == nil)
+
+            Divider()
+
+            ForEach(store.model.orderedBots) { bot in
+                Button(bot.id == store.model.selectedBotID
+                       ? "✓ \(bot.displayName)"
+                       : bot.displayName) {
+                    store.selectBot(bot.id)
+                }
+                .disabled(bot.id == store.model.selectedBotID || !store.model.connection.isLive)
+            }
+        }
+
         CommandMenu("Session") {
-            Button("Send Message") {
-                store.send()
+            Button(store.model.isStreaming ? "Steer Turn" : "Send Message") {
+                if store.model.isStreaming {
+                    store.steer()
+                } else {
+                    store.send()
+                }
             }
             .keyboardShortcut(.return, modifiers: .command)
-            .disabled(!store.canSend)
+            .disabled(store.model.isStreaming ? !store.canSteer : !store.canSend)
 
             Button("Interrupt Turn") {
                 store.interrupt()
@@ -72,12 +92,6 @@ struct WorkspaceCommands: Commands {
             .disabled(!store.canInterrupt)
 
             Divider()
-
-            Button("Reload Sessions") {
-                store.reloadSessions()
-            }
-            .keyboardShortcut("r", modifiers: .command)
-            .disabled(!store.model.connection.isLive)
 
             Button(store.model.connection.isLive ? "Disconnect" : "Connect") {
                 Task {
@@ -96,13 +110,6 @@ struct WorkspaceCommands: Commands {
                 store.openPalette()
             }
             .keyboardShortcut("k", modifiers: .command)
-        }
-
-        CommandGroup(after: .toolbar) {
-            Button(store.showsContextPanel ? "Hide Context Panel" : "Show Context Panel") {
-                store.toggleContextPanel()
-            }
-            .keyboardShortcut("\\", modifiers: .command)
         }
     }
 }

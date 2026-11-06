@@ -4,26 +4,30 @@ import SwiftUI
 
 /// The window: a `Tokens.frame` surround with the workspace clipped inside it.
 ///
-/// The surround is the app's one piece of theatre and it is exact — 8 pt on three sides,
-/// 28 pt on top so the hidden title bar's traffic lights sit on the frame colour rather than
-/// on the canvas. Everything inside is the three-pane workspace at OpenBot's geometry.
+/// The surround is the app's one piece of theatre and it is exact — 8 pt on three sides and a
+/// 28 pt top strip for the hidden title bar's traffic lights. The strip counts the system
+/// title-bar safe area instead of stacking on top of it, so the workspace is never pushed down
+/// twice. Leaving that strip also keeps the title bar's drag area intact.
 struct WorkspaceRoot: View {
     @ObservedObject var store: WorkspaceStore
 
     var body: some View {
-        ZStack {
-            Tokens.frame
-                .ignoresSafeArea()
+        GeometryReader { proxy in
+            ZStack {
+                Tokens.frame
+                    .ignoresSafeArea()
 
-            WorkspaceShell(model: store.model, store: store)
-                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .strokeBorder(Tokens.borderStrong, lineWidth: 1)
-                )
-                .padding(.horizontal, 8)
-                .padding(.top, 28)
-                .padding(.bottom, 8)
+                WorkspaceShell(model: store.model, store: store)
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .strokeBorder(Tokens.borderStrong, lineWidth: 1)
+                    )
+                    .padding(.horizontal, WorkspaceChrome.sideInset)
+                    .padding(.top, WorkspaceChrome.topPadding(safeAreaTop: proxy.safeAreaInsets.top))
+                    .padding(.bottom, WorkspaceChrome.bottomInset)
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
         .sheet(isPresented: $store.isPalettePresented) {
             CommandPaletteView(store: store)
@@ -42,7 +46,12 @@ struct WorkspaceRoot: View {
     }
 }
 
-/// Rail, session list, conversation, context panel — in that order, at that geometry.
+/// Bot directory, then the conversation — nothing on the right.
+///
+/// The app has one continuous conversation per bot, so a session browser and its context panel
+/// would be two more places to look for the same thread. Pairing, devices, settings and the
+/// command palette live in the native menu bar; the window itself is bots on the left and the
+/// selected bot's chat on the right.
 struct WorkspaceShell: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
@@ -54,10 +63,6 @@ struct WorkspaceShell: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            IconRail(model: model, store: store)
-
-            Hairline(.vertical)
-
             SessionSidebarView(model: model, store: store)
                 .frame(width: store.sidebarWidth)
 
@@ -72,11 +77,6 @@ struct WorkspaceShell: View {
                 // A new bot is a new conversation: re-creating the pane drops the old
                 // scroll position and any approval sheet that belonged to the last bot.
                 .id(model.selectedBotID ?? "no-bot")
-
-            if store.showsContextPanel {
-                Hairline(.vertical)
-                ContextPanelView(model: model, store: store)
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Tokens.canvas)

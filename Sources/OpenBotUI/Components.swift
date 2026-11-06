@@ -8,7 +8,7 @@
 //   StatusChip      transport / model / reasoning / queue count
 //   ToolCard        running / done / failed, collapsed over 12 lines, expands in place
 //   ApprovalCard    pending (three answers) / answered receipt / expired
-//   Composer        empty / typing / sending (interrupt) / disabled / queued
+//   Composer        empty / typing / sending (interrupt) / steering / disabled / queued
 //   ContextGauge    ok / warn > 70% / compact > 85%, ring or bar
 //   ConnectionBanner reconnecting / offline / protocol mismatch
 //   GroupedListRow  + GroupedSection: the 16 pt grouped card

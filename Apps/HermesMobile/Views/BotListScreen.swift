@@ -115,7 +115,6 @@ struct BotListScreen: View {
                 bot: bot,
                 load: { botID in try await model.modelCatalog(for: botID) },
                 conversationIsOpen: model.selectedBotID == bot.id,
-                resetConversation: { model.resetEndlessSession(for: bot.id) },
                 save: { botID, option, confirmed in
                     switch try await model.configureModel(botID: botID,
                                                           model: option.id,

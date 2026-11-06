@@ -174,6 +174,10 @@ public actor GatewayClient: GatewayClientProtocol {
     private var boundProfile: String?
     private var attachedRuntimeID: SessionID?
     private var attachedStoredID: SessionID?
+    /// Monotonic ordering for user-driven selections. Every resume/create takes a ticket before
+    /// its RPC leaves; only the newest ticket may attach to the transport. This is deliberately
+    /// below the UI: a stale reply cannot re-bind the socket even if the view has moved on.
+    private var sessionSelectionGeneration = 0
     private var lastSnapshot: SessionResume?
     private var rewindSurvivors: [SessionID: [Int64?]] = [:]
 
@@ -230,6 +234,12 @@ public actor GatewayClient: GatewayClientProtocol {
         setState(.closed(reason: "client closed"))
     }
 
+    /// A newer bot/session selection begins. Any resume already on the wire for the old one is
+    /// stale from this point on and may not call `attach`.
+    public func beginSessionSelection() async {
+        sessionSelectionGeneration += 1
+    }
+
     // MARK: Sessions
 
     public func ping() async throws {
@@ -268,28 +278,56 @@ public actor GatewayClient: GatewayClientProtocol {
     }
 
     public func resumeSession(_ id: SessionID, profile: String?) async throws -> SessionResume {
-        if let profile, !profile.isEmpty { boundProfile = profile }
-        let resumed = try await performResume(id, profile: profile ?? boundProfile)
+        // Every resume is a selection candidate. Taking the ticket before the RPC means two
+        // overlapping resumes (or an explicit beginSessionSelection from the next bot) leave only
+        // the newest one allowed to attach when its reply lands.
+        sessionSelectionGeneration += 1
+        let selection = sessionSelectionGeneration
+        let resolvedProfile = (profile?.isEmpty == false) ? profile : boundProfile
+        let resumed = try await performResume(id, profile: resolvedProfile)
+        // A newer selection took over while this reply was in flight. Return its data to the
+        // caller (which still owns its own UI epoch) but never let it become the transport's
+        // current attachment.
+        guard selection == sessionSelectionGeneration else { return resumed.resume }
+        if let profile, !profile.isEmpty {
+            boundProfile = profile
+        }
         attach(resumed, announced: false)
         return resumed.resume
     }
 
     public func createSession(model: String?, provider: String?) async throws -> SessionID {
-        try await createSession(model: model, provider: provider, profile: nil)
+        try await createSession(model: model, provider: provider, profile: nil, title: nil)
     }
 
     public func createSession(model: String?, provider: String?, profile: String?) async throws -> SessionID {
+        try await createSession(model: model, provider: provider, profile: profile, title: nil)
+    }
+
+    public func createSession(model: String?, provider: String?,
+                              profile: String?, title: String?) async throws -> SessionID {
         var params: [String: JSONValue] = [:]
         if let model { params["model"] = .string(model) }
         if let provider { params["provider"] = .string(provider) }
         // `profile` binds the new session to that bot for its whole life: the gateway stores the
         // resulting profile_home and re-binds HERMES_HOME on every turn.
         if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
+        // A title is the host-side identity another device can resolve with an exact-title
+        // `session.list`. `session.create` carries it as `pending_title`; the row is persisted by
+        // the title call below (or by the first prompt).
+        if let title, !title.isEmpty { params["title"] = .string(title) }
+        // `session.create` is part of the same selection ordering as a resume: a slow create for
+        // the bot the user left must not attach itself after a newer selection.
+        sessionSelectionGeneration += 1
+        let selection = sessionSelectionGeneration
         let result = try await perform("session.create", params: .object(params), timeout: timeouts.sessionResume)
         guard let runtimeID = result?["session_id"]?.stringValue else {
             throw GatewayError.malformedResponse(method: "session.create")
         }
         let storedID = result?["stored_session_id"]?.stringValue ?? runtimeID
+        // Return the id even when stale so the caller can clean up the unattached row, but do not
+        // let it become the transport's current attachment.
+        guard selection == sessionSelectionGeneration else { return storedID }
         if let profile, !profile.isEmpty { boundProfile = profile }
         attachedRuntimeID = runtimeID
         attachedStoredID = storedID
@@ -297,6 +335,35 @@ public actor GatewayClient: GatewayClientProtocol {
         // hands it to `session.resume`, which refuses a runtime id (`4007`). Returning the runtime
         // id here made "new chat" open a session that could not be resumed.
         return storedID
+    }
+
+    public func sessionID(titled title: String, profile: String?) async throws -> SessionID? {
+        var params: [String: JSONValue] = [
+            "title": .string(title),
+            "include_hidden": .bool(true),
+        ]
+        if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
+        let result = try await perform("session.list", params: .object(params), timeout: timeouts.sessionList)
+        let rows = try GatewayPayloadDecoder.sessionSummaries(result)
+        // The host's exact-title branch returns one row. Filtering on this side too keeps a host
+        // that ignored `title` from handing us an unrelated "most recent" row.
+        return rows.first { $0.title == title }?.id
+    }
+
+    public func mostRecentSession(profile: String?) async throws -> SessionID? {
+        var params: [String: JSONValue] = [:]
+        if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
+        let result = try await perform("session.most_recent", params: .object(params), timeout: timeouts.call)
+        return try GatewayPayloadDecoder.mostRecentSession(result)
+    }
+
+    public func setSessionTitle(_ id: SessionID, title: String) async throws {
+        _ = try await perform("session.title",
+                              params: .object([
+                                "session_id": .string(addressableID(id)),
+                                "title": .string(title),
+                              ]),
+                              timeout: timeouts.call)
     }
 
     public func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry] {
@@ -947,7 +1014,11 @@ public actor GatewayClient: GatewayClientProtocol {
         let previousRuntimeID = attachedRuntimeID
         let watermark = previousRuntimeID.flatMap { watermarks[$0] }
 
+        let selection = sessionSelectionGeneration
         let resumed = try await performResume(storedID, profile: boundProfile)
+        // The user picked another bot while this reconnect was on the wire. Its resume belongs to
+        // the old selection and must not attach over the newer one.
+        guard selection == sessionSelectionGeneration else { return }
         // A different runtime id is a different backend process: every question the old one was
         // blocked on died with it, so nothing it asked is still answerable.
         if let previous = previousRuntimeID, previous != resumed.runtimeID {

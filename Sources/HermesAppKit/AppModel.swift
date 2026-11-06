@@ -66,6 +66,10 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var draftSessionIDs: Set<SessionID> = []
     @Published public private(set) var transcript: [TranscriptEntry] = []
     @Published public private(set) var runningSessions: Set<SessionID> = []
+    /// Bots with a turn this client is watching. With one conversation per bot, this is what
+    /// lets the bot-only sidebar animate the row whose work is actually running instead of
+    /// borrowing the selected bot's state for every avatar.
+    @Published public private(set) var workingBotIDs: Set<String> = []
 
     // MARK: Live turn
 
@@ -156,7 +160,8 @@ public final class AppModel: ObservableObject {
         static let showReasoning = "hermes.showReasoning"
         static let showToolOutput = "hermes.showToolOutput"
         static let autoCompactTokens = "hermes.autoCompactTokens"
-        /// One stored session id per bot — the endless-chat contract (`docs/ENDLESS-CHAT.md` §2).
+        /// Cached resolved id per bot. A convenience for reset, never an identity claim:
+        /// `endlessSession` always asks the host for the exact canonical title first.
         static let endlessSessionPrefix = "hermes.endlessSession."
     }
 
@@ -184,18 +189,71 @@ public final class AppModel: ObservableObject {
     @Published public private(set) var pinnedBots: Set<String> = []
 
     @Published public var draft: String = ""
-    /// Picked but not yet sent. Held locally so a cancelled composer leaves nothing on the host.
-    @Published public private(set) var pendingAttachments: [PendingAttachment] = []
+    /// Picked but not yet sent, held per bot. A composer is scoped to the conversation that
+    /// opened it: carrying an image from one bot's composer into another's would upload it to
+    /// the wrong profile. The binding below is the current bot's slice of this storage.
+    @Published private var pendingAttachmentsByBot: [String: [PendingAttachment]] = [:]
+    /// Picked but not yet sent for the selected bot. Held locally so a cancelled composer leaves
+    /// nothing on the host.
+    public var pendingAttachments: [PendingAttachment] {
+        pendingAttachmentsByBot[pendingAttachmentScope] ?? []
+    }
     @Published public private(set) var sending = false
+    /// A `session.steer` call is on the wire. The draft stays in the field until the host
+    /// accepts it, and a second press cannot send the same instruction twice.
+    @Published public private(set) var isSteering = false
 
     /// Set when a send failed, so the UI can offer "retry" instead of losing the draft.
     @Published public private(set) var lastSendError: String?
+
+    /// Called after the host accepts text from the composer, with the bot it belonged to. The
+    /// macOS shell keeps per-bot drafts; without this it can restore text that a steer accepted
+    /// while the user was already switching away.
+    public var onDraftConsumed: (@MainActor (_ botID: String, _ acceptedText: String) -> Void)?
+
+    /// Called after a send fails, with the bot that typed it and the composition to put back.
+    /// The failure can arrive after a bot switch, so the shell must restore this into that bot's
+    /// parked draft rather than into whichever composer happens to be on screen now.
+    public var onDraftRestore: (@MainActor (_ botID: String, _ draft: String) -> Void)?
 
     private let client: GatewayClientProtocol
     private var eventTask: Task<Void, Never>?
     /// Bumped whenever the selected bot changes. An in-flight `session.list` compares it before
     /// publishing, so a slow answer for the bot we left cannot overwrite the bot we are on.
     private var botEpoch = 0
+
+    /// Bumped whenever the transcript is replaced by a host resume. A steer accepted after the
+    /// user switched away and came back may already be in that resume; this lets the success path
+    /// recognise it instead of appending a duplicate bubble.
+    private var sessionResumeGeneration = 0
+
+    /// One steer per client. Keeping the request here (rather than only in the RPC call) lets a
+    /// completion that lands before the RPC reply be held until the accepted steer is on screen.
+    private struct InFlightSteer {
+        let id: String
+        let session: SessionID
+        let botID: String?
+        let originalDraft: String
+        let text: String
+        let resumeGeneration: Int
+        let userOccurrencesAtStart: Int
+    }
+    private var inFlightSteer: InFlightSteer?
+    private var deferredCompletions: [(session: SessionID, text: String)] = []
+    /// Test seam: how many completions are waiting behind an in-flight steer.
+    var deferredCompletionCount: Int { deferredCompletions.count }
+    /// Same-bot opens are coalesced: two windows/tasks asking for one conversation must not both
+    /// observe "no canonical row" and each create a row. This is not cross-device atomicity.
+    private var endlessOpenTasks: [String: Task<SessionID?, Never>] = [:]
+    private var endlessOpenTokens: [String: UUID] = [:]
+    private var endlessOpenEpochs: [String: Int] = [:]
+    /// Monotonic token for bot opens. A slow open for the bot selected first must not attach
+    /// itself after a newer selection has taken over.
+    private var endlessSelectionEpoch = 0
+
+    /// Storage key for the selected bot's pending attachments. An unscoped composer (before the
+    /// directory loads) is its own slot rather than silently sharing the last bot's files.
+    private var pendingAttachmentScope: String { selectedBotID ?? "" }
 
     public init(client: GatewayClientProtocol, hostName: String = "hermes") {
         self.client = client
@@ -211,10 +269,11 @@ public final class AppModel: ObservableObject {
 
     // MARK: Lifecycle
 
-    /// Connect, then learn the bots, then read the selected bot's sessions.
+    /// Connect and learn the bots.
     ///
-    /// The order is the contract: every session row is scoped to one profile, so a list fetched
-    /// before the bot is known would have to be thrown away (or worse, shown).
+    /// The bot directory comes first because every session call is scoped to one profile. The
+    /// session list is deliberately not fetched here: no bot-first surface draws it, and it can
+    /// be silent on a cold profile.
     public func start() async {
         connection = .connecting
         do {
@@ -226,7 +285,9 @@ public final class AppModel: ObservableObject {
             loadPinnedBots()
             await loadBots()
             await loadModelLabel()
-            await loadSessions()
+            // The bot-first UI has no session browser: opening a bot resolves its one shared
+            // conversation by host title. Waiting for `session.list` here (observed silent for
+            // up to 120 s on a cold profile) would delay the first chat for a list nobody draws.
         } catch {
             connection = .failed(error.localizedDescription)
         }
@@ -253,8 +314,13 @@ public final class AppModel: ObservableObject {
             let loaded = try await client.listBots()
             bots = loaded
             botsError = nil
+            let previousSelection = selectedBotID
             if selectedBotID == nil || !loaded.contains(where: { $0.id == selectedBotID }) {
                 selectedBotID = Self.defaultBot(in: loaded, hostName: hostName)?.id
+            }
+            if selectedBotID != previousSelection {
+                // The directory changed the bot under an open that may still be in flight.
+                endlessSelectionEpoch += 1
             }
         } catch {
             botsError = error.localizedDescription
@@ -303,6 +369,11 @@ public final class AppModel: ObservableObject {
             await loadSessions()
             return
         }
+        // Invalidate an open already in flight for the bot we are leaving.
+        endlessSelectionEpoch += 1
+        // Invalidate it at the transport too: the UI epoch only protects what this window paints,
+        // and a stale resume must not leave the gateway bound to a different bot.
+        await client.beginSessionSelection()
         resetForBotSwitch()
         selectedBotID = resolved
         await loadSessions()
@@ -320,12 +391,17 @@ public final class AppModel: ObservableObject {
         liveTools = []
         isStreaming = false
         runningSessions = []
+        workingBotIDs = []
         pendingRequests = []
         contextUsed = nil
         contextMax = nil
         compactionNotice = nil
         sending = false
         lastSendError = nil
+        // Completions held for the bot being left must not land in the next bot's transcript.
+        deferredCompletions.removeAll()
+        // Pending attachments are not dropped: they live under their own bot's key and come back
+        // when that bot is selected again.
     }
 
     public func select(_ id: SessionID) async {
@@ -345,9 +421,11 @@ public final class AppModel: ObservableObject {
         // A resume that is still in flight when the bot (or the session) changes must not land:
         // it carries the transcript of the thing the user just left.
         let epoch = botEpoch
+        await client.beginSessionSelection()
         do {
             let resumed = try await client.resumeSession(id, profile: selectedBotID)
             guard epoch == botEpoch, selectedSessionID == id else { return }
+            sessionResumeGeneration += 1
             transcript = resumed.entries
             pendingRequests = resumed.openRequests
             adopt(resumed, session: id)
@@ -379,8 +457,10 @@ public final class AppModel: ObservableObject {
         liveTools = []
         if resumed.isStreaming {
             runningSessions.insert(session)
+            if let bot = selectedBotID { workingBotIDs.insert(bot) }
         } else {
             runningSessions.remove(session)
+            if let bot = selectedBotID { workingBotIDs.remove(bot) }
         }
     }
 
@@ -421,6 +501,7 @@ public final class AppModel: ObservableObject {
             }
             transcript = entries
             pendingRequests = resumed.openRequests
+            sessionResumeGeneration += 1
             streamingText = ""
             reasoningText = ""
             liveTools = []
@@ -432,33 +513,49 @@ public final class AppModel: ObservableObject {
     }
 
     public func send() async {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let originalDraft = draft
+        let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         // An attachment on its own is a complete message: a PDF with no comment is a normal thing
         // to send, and refusing it here made "attach a file, tap send" look like a dead button.
-        guard let sid = selectedSessionID, !sending,
-              !text.isEmpty || !pendingAttachments.isEmpty else { return }
-        let attachedNames = pendingAttachments.map(\.name)
+        // While a turn is live, the composer's Send becomes Steer; a normal submit here would
+        // start a second turn (and duplicate the text) instead of reaching the running one.
+        guard let sid = selectedSessionID, !sending, !isStreaming, !isSteering else { return }
+        // Snapshot both the bot and its files. A switch during the upload must upload into the
+        // conversation that owned them, never the conversation that happens to be on screen now.
+        let botID = selectedBotID
+        let attachments = pendingAttachments
+        guard !text.isEmpty || !attachments.isEmpty else { return }
+        let attachedNames = attachments.map(\.name)
         sending = true
         lastSendError = nil
         draft = ""
-        if let bot = selectedBotID { recordActivity(for: bot) }
+        if let botID {
+            recordActivity(for: botID)
+            workingBotIDs.insert(botID)
+        }
 
         // Attachments are uploaded *before* the turn so a failure cannot leave a phantom message
         // in the transcript, and so a file's `@file:` reference can travel in the same prompt.
         var refs: [String] = []
-        if !pendingAttachments.isEmpty {
+        if !attachments.isEmpty {
             do {
-                for attachment in pendingAttachments {
+                for attachment in attachments {
                     let receipt = try await client.attach(session: sid, name: attachment.name,
                                                           data: attachment.data,
                                                           isImage: attachment.isImage)
                     if let ref = receipt.refText { refs.append(ref) }
                 }
-                pendingAttachments = []
+                // Remove only the files that were uploaded. Anything picked while this send was
+                // in flight stays in the composer for the next turn.
+                removePendingAttachments(Set(attachments.map(\.id)), for: botID)
             } catch {
-                sending = false
-                lastSendError = error.localizedDescription
-                draft = text
+                // If the user switched while the upload was running, a newer send may own the
+                // flag now. Only the conversation that started this upload may clear it.
+                if selectedSessionID == sid { sending = false }
+                // The failure belongs to the bot that typed it, even when another bot is on
+                // screen now. Put both halves of the composition back under that bot.
+                restoreFailedSend(originalDraft: originalDraft, botID: botID,
+                                  attachments: attachments, session: sid, error: error)
                 return // keep both the words and the attachments: nothing was sent
             }
         }
@@ -467,31 +564,67 @@ public final class AppModel: ObservableObject {
             : (refs.isEmpty ? text : refs.joined(separator: "\n") + "\n\n" + text)
 
         let optimisticID = UUID().uuidString
-        // An interrupted turn leaves its cards live; they belong to that turn, above this message.
-        flushLiveTools()
-        // The bubble shows what the user typed; an attachment-only send names its files instead of
-        // rendering an empty row.
-        let bubbleText = text.isEmpty ? attachedNames.joined(separator: ", ") : text
-        transcript.append(TranscriptEntry(id: optimisticID, role: .user, text: bubbleText))
-        streamingText = ""
-        reasoningText = ""
-        compactionNotice = nil
-        isStreaming = true
-        runningSessions.insert(sid)
+        // Uploading is an await: the user may have switched conversations while it ran. Only the
+        // conversation that initiated the send may change; a new bot's pane must stay untouched.
+        let startedOnScreen = selectedSessionID == sid && selectedBotID == botID
+        if startedOnScreen {
+            // An interrupted turn leaves its cards live; they belong to that turn, above this message.
+            flushLiveTools()
+            // The bubble shows what the user typed; an attachment-only send names its files instead
+            // of rendering an empty row.
+            let bubbleText = text.isEmpty ? attachedNames.joined(separator: ", ") : text
+            transcript.append(TranscriptEntry(id: optimisticID, role: .user, text: bubbleText))
+            streamingText = ""
+            reasoningText = ""
+            compactionNotice = nil
+            isStreaming = true
+            runningSessions.insert(sid)
+        }
         do {
             try await client.submit(session: sid, text: outgoing)
             // The first prompt is what persists a draft into a real row, so from now on this
             // session resumes like any other.
             draftSessionIDs.remove(sid)
         } catch {
-            isStreaming = false
-            lastSendError = error.localizedDescription
-            draft = text // never lose what the user typed
-            // By id, not by position: switching bots or sessions while the submit was in flight
-            // empties the transcript, and a blind `removeLast()` would trap on it.
-            transcript.removeAll { $0.id == optimisticID }
+            // A switch during the submit means the current pane belongs to someone else; do not
+            // clear its streaming flag or overwrite its draft with this failure.
+            if selectedSessionID == sid, selectedBotID == botID {
+                isStreaming = false
+                // By id, not by position: switching bots or sessions while the submit was in
+                // flight empties the transcript, and a blind `removeLast()` would trap on it.
+                transcript.removeAll { $0.id == optimisticID }
+            }
+            // The files were removed from the local composer after upload. A failed submit never
+            // produced a message, so put them back under the bot that owned them — on screen or
+            // not — or a retry silently sends text without its attachments.
+            restoreFailedSend(originalDraft: originalDraft, botID: botID,
+                              attachments: attachments, session: sid, error: error)
         }
-        sending = false
+        // A send that started on the previous bot must not clear the flag for a send that has
+        // already started on the bot now on screen. A switch already reset it to false.
+        if selectedSessionID == sid { sending = false }
+    }
+
+    /// Put a failed composition back where it belongs.
+    ///
+    /// The bot is the owner, not whatever pane is visible: a send can fail after the user has
+    /// already switched away. The visible field is only touched when it is still the same
+    /// conversation and the user has not typed something newer.
+    private func restoreFailedSend(originalDraft: String,
+                                   botID: String?,
+                                   attachments: [PendingAttachment],
+                                   session: SessionID,
+                                   error: Error) {
+        if let botID {
+            workingBotIDs.remove(botID)
+            restorePendingAttachments(attachments, for: botID)
+            if !originalDraft.isEmpty { onDraftRestore?(botID, originalDraft) }
+        }
+        guard selectedSessionID == session, selectedBotID == botID else { return }
+        lastSendError = error.localizedDescription
+        // Never throw away text typed after the request left. The original draft goes back
+        // only into the same conversation's still-empty field.
+        if draft.isEmpty { draft = originalDraft }
     }
 
     // MARK: Attachments
@@ -529,11 +662,40 @@ public final class AppModel: ObservableObject {
             lastSendError = "That attachment is larger than the 8 MB limit."
             return
         }
-        pendingAttachments.append(PendingAttachment(name: name, isImage: isImage, data: data))
+        let scope = pendingAttachmentScope
+        var attachments = pendingAttachmentsByBot[scope] ?? []
+        attachments.append(PendingAttachment(name: name, isImage: isImage, data: data))
+        pendingAttachmentsByBot[scope] = attachments
     }
 
     public func removePendingAttachment(_ id: UUID) {
-        pendingAttachments.removeAll { $0.id == id }
+        removePendingAttachments([id], for: selectedBotID)
+    }
+
+    /// Remove the named files from one bot's composer. Kept scoped so a send or removal that
+    /// finishes after a switch cannot touch the new bot's pending attachments.
+    private func removePendingAttachments(_ ids: Set<UUID>, for botID: String?) {
+        let scope = botID ?? ""
+        guard var attachments = pendingAttachmentsByBot[scope] else { return }
+        attachments.removeAll { ids.contains($0.id) }
+        if attachments.isEmpty {
+            pendingAttachmentsByBot.removeValue(forKey: scope)
+        } else {
+            pendingAttachmentsByBot[scope] = attachments
+        }
+    }
+
+    /// Put a failed send's files back under the bot that picked them.
+    ///
+    /// Merge by id so a file the user picked while the send was in flight is not duplicated or
+    /// discarded. This runs for a failure after a switch too, when the bot is not on screen.
+    private func restorePendingAttachments(_ attachments: [PendingAttachment], for botID: String?) {
+        guard !attachments.isEmpty else { return }
+        let scope = botID ?? ""
+        var current = pendingAttachmentsByBot[scope] ?? []
+        let existing = Set(current.map(\.id))
+        current.append(contentsOf: attachments.filter { !existing.contains($0.id) })
+        pendingAttachmentsByBot[scope] = current
     }
 
     public func interrupt() async {
@@ -541,112 +703,328 @@ public final class AppModel: ObservableObject {
         try? await client.interrupt(session: sid)
     }
 
-    // MARK: Sessions (macOS workspace additions)
-
-    /// Start a fresh session on the host and open it.
+    /// Send the composer's text into the turn that is already running.
     ///
-    /// The list is reloaded *before* selecting so the new row exists in the sidebar by the
-    /// time the conversation pane switches to it.
-    public func newSession(model: String? = nil, provider: String? = nil) async {
-        sessionsLoading = true
-        defer { sessionsLoading = false }
+    /// This is deliberately a separate call from `send()`: steering must reach
+    /// `session.steer` and must never fall back to `prompt.submit`, which would start a new
+    /// turn and deliver the instruction twice. Nothing about the live reply, reasoning or
+    /// tool cards is touched — only the draft is cleared, and only after the host accepted
+    /// the steer. The stored→runtime session translation happens inside `GatewayClient`.
+    public func steer() async {
+        let originalDraft = draft
+        let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let sid = selectedSessionID, !isSteering, !text.isEmpty else { return }
+        // A turn that already ended between the keystroke and this call is a normal race, not
+        // permission to submit: tell the user what happened and keep the words they typed.
+        guard isStreaming else {
+            lastSendError = "The turn finished before your message could be steered. Your text is still in the composer — press Send to start a new turn."
+            return
+        }
+        // `session.steer` carries no attachment payload. Preserve both sides rather than
+        // silently dropping the files or the text while pretending the steer went through.
+        guard pendingAttachments.isEmpty else {
+            lastSendError = "Attachments can't be added to a running turn. Your message and \(pendingAttachments.count) attachment(s) are still here — remove them to steer, or wait for the turn to finish."
+            return
+        }
+
+        let botID = selectedBotID
+        let steerID = "steer-\(UUID().uuidString)"
+        isSteering = true
+        lastSendError = nil
+        inFlightSteer = InFlightSteer(
+            id: steerID, session: sid, botID: botID,
+            originalDraft: originalDraft, text: text,
+            resumeGeneration: sessionResumeGeneration,
+            userOccurrencesAtStart: transcript.filter { $0.role == .user && $0.text == text }.count)
         do {
-            let created = try await client.createSession(model: model, provider: provider, profile: selectedBotID)
-            // `session.create` mints a **draft**: the gateway deliberately writes no row until the
-            // first prompt (so abandoned launches do not litter "Untitled" sessions). A draft is
-            // therefore not resumable — `session.resume` answers 4007 "session not found" — and the
-            // create reply is already everything the pane needs. Adopt it instead of selecting it,
-            // which used to fire that resume and paint "could not resume session" as a dead host.
-            draftSessionIDs.insert(created)
-            selectedSessionID = created
-            transcript = []
-            streamingText = ""
-            isStreaming = false
-            pendingRequests = []
-            lastSendError = nil
-            sessions = try await client.listSessions(limit: 50, profile: selectedBotID, includeHidden: true)
+            try await client.steer(session: sid, text: text)
+            let steerSnapshot = inFlightSteer
+            let resumedSinceStart = steerSnapshot?.resumeGeneration != sessionResumeGeneration
+            clearInFlightSteer(steerID)
+            // The host accepted this text for that bot even if the user has since switched away.
+            // Tell the shell so it does not offer the same words as a draft again.
+            if let botID { onDraftConsumed?(botID, text) }
+            // Switching sessions/bots while the call was on the wire must not clear the draft
+            // of the conversation now on screen, nor attach the bubble to the wrong thread.
+            guard selectedSessionID == sid else {
+                discardDeferredCompletions(for: sid)
+                return
+            }
+            // A switch back resumes the host's transcript. If that resume already contains the
+            // accepted steer, appending it here would show the same instruction twice. Compare
+            // occurrence counts, not just the last user row: a later message on another device
+            // must not hide the accepted instruction that landed before it.
+            let occurrencesNow = transcript.filter { $0.role == .user && $0.text == text }.count
+            let alreadyInResumedTranscript = resumedSinceStart
+                && occurrencesNow > (steerSnapshot?.userOccurrencesAtStart ?? 0)
+            // Only clear the exact composition that was sent. Text typed while the RPC was in
+            // flight is newer than this request and must survive the acknowledgement.
+            if draft == originalDraft { draft = "" }
+            if !alreadyInResumedTranscript {
+                transcript.append(TranscriptEntry(id: steerID, role: .user, text: text))
+            }
+            if let botID { recordActivity(for: botID) }
+            // A completion that arrived before the RPC reply was held back: put the accepted
+            // steer ahead of it, then let the answer (and its tools/reasoning) land after.
+            await drainDeferredCompletions(for: sid)
+        } catch is CancellationError {
+            // Leaving the screen is not a failed steer, and the draft was never cleared.
+            clearInFlightSteer(steerID)
+            await drainDeferredCompletions(for: sid)
         } catch {
-            lastSendError = "could not start a session: \(error.localizedDescription)"
+            clearInFlightSteer(steerID)
+            // The completion was held only while the steer was undecided. A failed steer adds no
+            // row, so let the answer land now and then explain the race.
+            await drainDeferredCompletions(for: sid)
+            guard selectedSessionID == sid else { return }
+            if !isStreaming {
+                lastSendError = "The turn ended before the steer reached it (\(error.localizedDescription)). Your text is still in the composer — press Send to start a new turn."
+            } else {
+                lastSendError = "Could not steer the running turn: \(error.localizedDescription). Your text is still in the composer."
+            }
         }
     }
 
-    /// True while a created session has no row on the host yet (see `newSession`).
+    private func clearInFlightSteer(_ id: String) {
+        if inFlightSteer?.id == id {
+            inFlightSteer = nil
+            isSteering = false
+        }
+    }
+
+    private func discardDeferredCompletions(for session: SessionID) {
+        deferredCompletions.removeAll { $0.session == session }
+    }
+
+    /// Release completions that arrived while a steer was on the wire.
+    ///
+    /// They are processed only after the steer's own bubble has been placed (or after the steer
+    /// failed), so the transcript never shows an answer to a message that appears below it.
+    private func drainDeferredCompletions(for session: SessionID) async {
+        let completions = deferredCompletions.filter { $0.session == session }
+        deferredCompletions.removeAll { $0.session == session }
+        for completion in completions {
+            guard selectedSessionID == session else { continue }
+            await finishTurn(session: completion.session, text: completion.text)
+        }
+    }
+
+    // MARK: Conversation (macOS workspace additions)
+
+    /// Start a fresh conversation for the selected bot.
+    ///
+    /// This client deliberately keeps one continuous conversation per bot. A new thread would
+    /// require retitling or archiving the existing one, which is unsafe without an atomic claim,
+    /// so this reports that the existing history was left unchanged instead of migrating it.
+    public func newSession(model: String? = nil, provider: String? = nil) async {
+        _ = (model, provider)
+        guard let bot = selectedBotID else {
+            lastSendError = "could not start a conversation: no bot is selected"
+            return
+        }
+        await resetEndlessSession(for: bot)
+    }
+
+    /// True while a created session has no row on the host yet (see `endlessSession`).
     public func isDraft(_ id: SessionID) -> Bool { draftSessionIDs.contains(id) }
 
     /// Retry a dropped connection without losing the open session.
     public func retryConnection() async {
         let previous = selectedSessionID
         await start()
-        if let previous, sessions.contains(where: { $0.id == previous }) {
+        if let previous {
+            // Resume the attached conversation directly; `start()` deliberately does not wait
+            // for a session list the bot-first UI never shows.
             await select(previous)
         }
     }
 
     // MARK: Endless conversation
 
-    /// The one conversation this bot has: resume it, or start and remember one.
+    /// The exact server-side title of a bot's one conversation.
     ///
-    /// The product has no session list, so each bot owns exactly one stored id
-    /// (`hermes.endlessSession.<botID>`). A stored id stays resumable until the host forgets the
-    /// session: `4001` is "session not found" and `4007` is the same for an id from another profile,
-    /// and only those two justify opening a new conversation. Any other failure (a timeout, a dead
-    /// socket) is reported instead — starting a blank conversation over a transient error would
-    /// hide the user's history behind a new empty one.
+    /// This is not a local convention: Hermes' own canonical Bot Chat is exactly this title
+    /// (`tools/bot_mode_probe.py::BOT_CHAT_TITLE`, the same value the Desktop's
+    /// `createCanonicalChat` uses). `session.list {profile, title}` is a discovery lookup, not
+    /// an atomic claim: the host does not enforce title uniqueness, so two devices can still
+    /// create separate rows. See `docs/ENDLESS-CHAT.md` §2 for the limitations.
+    public static let canonicalConversationTitle = "Bot Chat"
+
+    /// Open the one conversation this bot has.
+    ///
+    /// Resolution order, each step verified against the host:
+    /// 1. the exact canonical title, opened as-is;
+    /// 2. this device's previously resolved id, *only* if the host can still resume it. This is
+    ///    the recovery path for conversations created before the canonical title existed: they
+    ///    remain reachable instead of being silently replaced by a fresh empty thread;
+    /// 3. otherwise a new canonical row.
+    ///
+    /// An exact title is a discovery hint, not a distributed lock. The host does not make
+    /// "find or create by title" atomic and does not enforce title uniqueness, so this method
+    /// makes no cross-device sync guarantee. Within one client, same-bot opens are coalesced.
+    /// If the new row cannot be given the canonical title it is not claimed or cached; the
+    /// failure is reported and no existing history is replaced.
     public func endlessSession(for botID: String) async -> SessionID? {
+        // Coalesce only a task that still belongs to the newest selection. If the user switched
+        // away and back, an old task for this bot is stale and must be replaced rather than
+        // awaited.
+        if let inFlight = endlessOpenTasks[botID], endlessOpenEpochs[botID] == endlessSelectionEpoch {
+            return await inFlight.value
+        }
+        // Tell the transport that a newer selection has begun before its resume leaves. The UI
+        // epoch below cannot stop a stale reply from re-binding the socket inside GatewayClient.
+        await client.beginSessionSelection()
+        endlessSelectionEpoch += 1
+        let epoch = endlessSelectionEpoch
+        let token = UUID()
+        endlessOpenTokens[botID] = token
+        endlessOpenEpochs[botID] = epoch
+        let task = Task<SessionID?, Never> { [weak self] in
+            guard let self else { return nil }
+            return await self.openEndlessSession(for: botID, epoch: epoch)
+        }
+        endlessOpenTasks[botID] = task
+        let result = await task.value
+        if endlessOpenTokens[botID] == token {
+            endlessOpenTasks[botID] = nil
+            endlessOpenTokens[botID] = nil
+            endlessOpenEpochs[botID] = nil
+        }
+        return result
+    }
+
+    private func openEndlessSession(for botID: String, epoch: Int) async -> SessionID? {
+        guard epoch == endlessSelectionEpoch else { return nil }
         if botID != selectedBotID {
             // The transcript, tools and streaming state on screen belong to the bot being left.
             resetForBotSwitch()
             selectedBotID = botID
         }
         await loadModelLabel()
+        guard epoch == endlessSelectionEpoch, selectedBotID == botID else { return nil }
         let key = Self.endlessKey(botID)
-        if let stored = Self.defaults.string(forKey: key), !stored.isEmpty {
-            do {
-                let resumed = try await client.resumeSession(stored, profile: botID)
-                selectedSessionID = stored
-                transcript = resumed.entries
-                pendingRequests = resumed.openRequests
-                adopt(resumed, session: stored)
-                return stored
-            } catch is CancellationError {
-                // Leaving the screen cancels the open-in-flight; the next visit resumes normally.
-                return nil
-            } catch {
-                // Only a session the host has forgotten is worth replacing; a timeout or a dead
-                // socket must be reported, never papered over with a new empty conversation.
-                guard let gateway = error as? GatewayError, Self.isForgottenSession(gateway) else {
-                    lastSendError = "could not open the conversation: \(error.localizedDescription)"
-                    return nil
+
+        do {
+            if let canonical = try await client.sessionID(titled: Self.canonicalConversationTitle,
+                                                          profile: botID) {
+                // The host already owns this identity: open it, never churn its title.
+                let opened = try await resumeConversation(canonical, botID: botID, epoch: epoch)
+                Self.defaults.set(opened, forKey: key)
+                return opened
+            }
+
+            guard epoch == endlessSelectionEpoch, selectedBotID == botID else { throw CancellationError() }
+
+            // No canonical row. Before creating a replacement, try the id this device last
+            // resolved for this bot. It may be a pre-canonical conversation whose history the
+            // user still needs. A successful resume proves it exists; a transient failure is
+            // reported rather than turned into a fresh thread that loses the pointer.
+            if let stored = Self.defaults.string(forKey: key), !stored.isEmpty {
+                do {
+                    let recovered = try await resumeConversation(stored, botID: botID, epoch: epoch)
+                    Self.defaults.set(recovered, forKey: key)
+                    // Do not retitle recovered history. It may carry a title the user chose, and
+                    // an automatic migration here mutates an existing chat before anyone asked.
+                    // The local pointer keeps this thread reachable; cross-device discovery is a
+                    // separate, unresolved race (docs/ENDLESS-CHAT.md §2).
+                    return recovered
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    guard Self.isMissingSessionError(error) else {
+                        lastSendError = "could not open \(botID)'s saved conversation: \(error.localizedDescription). It was left in place; no new conversation was created."
+                        return nil
+                    }
+                    // The host says that id no longer exists. A fresh canonical row is safe.
                 }
             }
-        }
-        do {
-            // `createSession` answers with the **stored** id, which is what a later resume needs.
-            let created = try await client.createSession(model: nil, provider: nil, profile: botID)
+
+            guard epoch == endlessSelectionEpoch, selectedBotID == botID else { throw CancellationError() }
+            let created = try await client.createSession(model: nil, provider: nil,
+                                                          profile: botID,
+                                                          title: Self.canonicalConversationTitle)
+            // Navigation while the row was being created is a cancellation. The row has no
+            // history yet; leave it under a non-canonical title rather than attaching it.
+            guard epoch == endlessSelectionEpoch, selectedBotID == botID else {
+                await abandonUnattachedSession(created)
+                throw CancellationError()
+            }
+            do {
+                try await client.setSessionTitle(created, title: Self.canonicalConversationTitle)
+            } catch {
+                await abandonUnattachedSession(created)
+                lastSendError = "could not open \(botID)'s conversation safely: \(error.localizedDescription). The new row was not claimed, and no existing history was replaced."
+                return nil
+            }
+            guard epoch == endlessSelectionEpoch, selectedBotID == botID else {
+                await abandonUnattachedSession(created)
+                throw CancellationError()
+            }
+
+            // The title write is the best available publication step; it is not an atomic
+            // cross-device claim. Cache only after the host accepted it.
             Self.defaults.set(created, forKey: key)
-            // The row does not exist until the first prompt, so this is a draft: mark it before
-            // `select`, whose resume would otherwise answer 4007 and report an unreachable host.
             draftSessionIDs.insert(created)
-            await select(created)
+            clearConversation()
+            selectedSessionID = created
             return created
+        } catch is CancellationError {
+            // Leaving the screen cancels the open-in-flight; the next visit resolves normally.
+            return nil
         } catch {
-            lastSendError = "could not start a conversation: \(error.localizedDescription)"
+            lastSendError = "could not open the conversation: \(error.localizedDescription)"
             return nil
         }
     }
 
-    /// Forget this bot's conversation so the next open starts a new one.
+    /// Reset is intentionally unavailable.
     ///
-    /// Only the stored id is cleared: the session itself stays on the host, because deleting
-    /// history is not what "reset" on this screen means (and the host refuses to delete a session
-    /// it still holds live).
-    public func resetEndlessSession(for botID: String) {
-        let key = Self.endlessKey(botID)
-        let stored = Self.defaults.string(forKey: key)
-        Self.defaults.removeObject(forKey: key)
-        guard let stored, selectedSessionID == stored else { return }
-        // The conversation on screen is the one just forgotten: leaving its bubbles up would let
-        // the user keep typing into a session nothing will reopen.
+    /// Making a replacement canonical requires either retitling an existing chat or archiving it.
+    /// Neither is safe to do automatically: the host has no atomic title claim, and a rename can
+    /// make history the user still needs look like an abandoned row on another device. The safe
+    /// behaviour is to keep the current thread exactly as it is and say so, rather than migrate or
+    /// reset it behind the user's back.
+    public func resetEndlessSession(for botID: String) async {
+        guard selectedBotID == botID else {
+            lastSendError = "could not reset the conversation: \(botID) is not the open bot. Its history was not touched."
+            return
+        }
+        lastSendError = "This client keeps \(botID)'s existing conversation. Starting a new one would require retitling or archiving its history, so nothing was changed."
+    }
+
+    private func resumeConversation(_ id: SessionID, botID: String, epoch: Int) async throws -> SessionID {
+        let resumed = try await client.resumeSession(id, profile: botID)
+        guard epoch == endlessSelectionEpoch, selectedBotID == botID else { throw CancellationError() }
+        selectedSessionID = id
+        sessionResumeGeneration += 1
+        transcript = resumed.entries
+        pendingRequests = resumed.openRequests
+        draftSessionIDs.remove(id)
+        adopt(resumed, session: id)
+        return id
+    }
+
+    /// Best effort to take a row that was created for a cancelled/failed operation out of the
+    /// canonical slot. Its history (none, by construction) is not deleted and the ID is not
+    /// cached, so a later open resolves normally. This only ever touches a row this client just
+    /// created; recovered history is never retitled.
+    private func abandonUnattachedSession(_ id: SessionID) async {
+        try? await client.setSessionTitle(id, title: archivedTitle(id, label: "unshared"))
+    }
+
+    private func archivedTitle(_ id: SessionID, label: String) -> String {
+        "\(Self.canonicalConversationTitle) · \(label) \(String(id.prefix(8)))"
+    }
+
+    /// Hermes uses 4007 for a stored id that is not attached/resolvable; 4001 is the equivalent
+    /// for a missing runtime session. Only those mean the cached id is genuinely stale. A
+    /// timeout or transport failure must not be mistaken for "delete the old pointer".
+    private static func isMissingSessionError(_ error: Error) -> Bool {
+        guard case GatewayError.rpc(let rpc) = error else { return false }
+        return rpc.code == 4001 || rpc.code == 4007
+    }
+
+    private func clearConversation() {
         selectedSessionID = nil
         transcript = []
         pendingRequests = []
@@ -657,7 +1035,8 @@ public final class AppModel: ObservableObject {
         contextUsed = nil
         contextMax = nil
         compactionNotice = nil
-        runningSessions.remove(stored)
+        runningSessions = []
+        if let bot = selectedBotID { workingBotIDs.remove(bot) }
     }
 
     // MARK: Compaction
@@ -700,11 +1079,6 @@ public final class AppModel: ObservableObject {
         Keys.endlessSessionPrefix + botID
     }
 
-    private static func isForgottenSession(_ error: GatewayError) -> Bool {
-        guard let rpc = error.rpcError else { return false }
-        return rpc.code == 4001 || rpc.code == 4007
-    }
-
     /// Read the host's current model for the header chip.
     ///
     /// Silent on failure: no chip is honest, a wrong model name is the bug this replaced.
@@ -729,6 +1103,13 @@ public final class AppModel: ObservableObject {
     }
 
     public func hasUnread(_ botID: String) -> Bool { unreadBots.contains(botID) }
+
+    /// Whether this bot's conversation is running right now. The event stream only exists for
+    /// the attached bot, so this is deliberately a fact about what this client is watching —
+    /// a dormant row is never animated on a guess.
+    public func isBotWorking(_ botID: String) -> Bool {
+        workingBotIDs.contains(botID) || (botID == selectedBotID && isStreaming)
+    }
 
     // MARK: Bot activity
 
@@ -885,6 +1266,16 @@ public final class AppModel: ObservableObject {
     /// The turn is live or the submit is still in flight.
     public var isBusy: Bool { isStreaming || sending }
 
+    /// The composer has text that can go into the running turn. Attachments do not make this
+    /// false: `steer()` keeps them and explains why the wire cannot carry them, which is more
+    /// discoverable than disabling the button for a reason the UI would have to hide.
+    public var canSteer: Bool {
+        selectedSessionID != nil
+            && isStreaming
+            && !isSteering
+            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// How full the context is, `0…1`, or `nil` until the host has reported both numbers.
     /// The conversation header draws its gauge from this, so an unreported context is an absent
     /// gauge rather than an empty one.
@@ -1005,6 +1396,7 @@ public final class AppModel: ObservableObject {
             beginLiveTurn()
             isStreaming = true
             runningSessions.insert(session)
+            if let bot = selectedBotID { workingBotIDs.insert(bot) }
             streamingText += text
         case .thinkingDelta(let session, let text):
             // Same stream discipline as the reply, a different destination: reasoning belongs
@@ -1014,39 +1406,24 @@ public final class AppModel: ObservableObject {
             beginLiveTurn()
             isStreaming = true
             runningSessions.insert(session)
+            if let bot = selectedBotID { workingBotIDs.insert(bot) }
             reasoningText += text
         case .messageComplete(let session, let text):
             guard session == selectedSessionID else { return }
-            if let bot = selectedBotID {
-                recordActivity(for: bot)
-                // A reply for a bot you are not looking at is the only thing that earns a dot.
-                if visibleBotID != bot { unreadBots.insert(bot) }
+            // A steer is accepted by the host but its RPC reply may come after the assistant's
+            // completion. Hold the completion briefly so the accepted steer is inserted *above*
+            // the answer it influenced, instead of the answer appearing first.
+            if inFlightSteer?.session == session {
+                deferredCompletions.append((session, text))
+                // The turn itself is over; only the *transcript order* waits for the steer RPC
+                // acknowledgement. Keeping the "running" flag set would leave the composer
+                // unable to send if the acknowledgement is slow.
+                isStreaming = false
+                runningSessions.remove(session)
+                if let bot = selectedBotID { workingBotIDs.remove(bot) }
+                return
             }
-            // A completion with no text would otherwise leave a blank bubble beside the streamed
-            // one; the deltas already hold the reply.
-            let finalText = text.isEmpty ? streamingText : text
-            // Reasoning is a separate stream and used to be wiped here, so a turn's thinking was
-            // visible while it ran and gone the moment the answer landed.
-            if !reasoningText.isEmpty {
-                transcript.append(TranscriptEntry(id: "reasoning-\(UUID().uuidString)",
-                                                  role: .reasoning,
-                                                  text: reasoningText))
-            }
-            // The turn's tool cards become transcript rows *before* the answer: appending the
-            // assistant message first would push every card underneath the reply it produced,
-            // and leaving them in `liveTools` meant the next resume — which answers with the
-            // host's messages only — wiped them from the thread.
-            flushLiveTools()
-            if !finalText.isEmpty {
-                transcript.append(TranscriptEntry(id: UUID().uuidString, role: .assistant, text: finalText))
-            }
-            streamingText = ""
-            isStreaming = false
-            reasoningText = ""
-            runningSessions.remove(session)
-            // Not awaited: compaction is a model turn that can take minutes, and parking this loop
-            // would hold back every later delta, approval and tool event behind it.
-            Task { await self.autoCompactIfNeeded() }
+            await finishTurn(session: session, text: text)
         case .contextUsage(let session, let used, let max, _):
             guard session == selectedSessionID else { return }
             contextUsed = used
@@ -1057,6 +1434,7 @@ public final class AppModel: ObservableObject {
             beginLiveTurn()
             isStreaming = true
             runningSessions.insert(session)
+            if let bot = selectedBotID { workingBotIDs.insert(bot) }
             // The card's label is the wire's `name`; the old projection rendered the literal word
             // "tool" for every call. An unnamed call is said to be unknown rather than mislabelled.
             let resolved = name.isEmpty ? "unknown tool" : name
@@ -1103,13 +1481,54 @@ public final class AppModel: ObservableObject {
         case .requestCancelled(let id, _):
             pendingRequests.removeAll { $0.id == id }
         case .sessionUpdated(let session):
-            if session == selectedSessionID { /* keep transcript; a refresh comes from resume */ }
-            await loadSessions()
+            // The bot-first UI has no session list to refresh. Keep the open transcript; a real
+            // refresh comes from `session.resume`, not from making the event loop wait on
+            // `session.list` (which can be silent on a cold profile).
+            _ = session
         case .error(_, let message):
             lastSendError = message
         case .unknown:
             break
         }
+    }
+
+    /// Land one completed turn in the transcript.
+    ///
+    /// Split out from the event switch so a completion held behind an in-flight steer can be
+    /// replayed at the right moment, after the accepted steer row is in place.
+    private func finishTurn(session: SessionID, text: String) async {
+        guard session == selectedSessionID else { return }
+        if let bot = selectedBotID {
+            recordActivity(for: bot)
+            // A reply for a bot you are not looking at is the only thing that earns a dot.
+            if visibleBotID != bot { unreadBots.insert(bot) }
+        }
+        // A completion with no text would otherwise leave a blank bubble beside the streamed
+        // one; the deltas already hold the reply.
+        let finalText = text.isEmpty ? streamingText : text
+        // Reasoning is a separate stream and used to be wiped here, so a turn's thinking was
+        // visible while it ran and gone the moment the answer landed.
+        if !reasoningText.isEmpty {
+            transcript.append(TranscriptEntry(id: "reasoning-\(UUID().uuidString)",
+                                              role: .reasoning,
+                                              text: reasoningText))
+        }
+        // The turn's tool cards become transcript rows *before* the answer: appending the
+        // assistant message first would push every card underneath the reply it produced,
+        // and leaving them in `liveTools` meant the next resume — which answers with the
+        // host's messages only — wiped them from the thread.
+        flushLiveTools()
+        if !finalText.isEmpty {
+            transcript.append(TranscriptEntry(id: UUID().uuidString, role: .assistant, text: finalText))
+        }
+        streamingText = ""
+        isStreaming = false
+        reasoningText = ""
+        runningSessions.remove(session)
+        if let bot = selectedBotID { workingBotIDs.remove(bot) }
+        // Not awaited: compaction is a model turn that can take minutes, and parking this loop
+        // would hold back every later delta, approval and tool event behind it.
+        Task { await self.autoCompactIfNeeded() }
     }
 
     /// A new turn is starting: the previous turn's tool cards described a turn whose answer has
@@ -1334,6 +1753,16 @@ public final class PreviewGatewayClient: GatewayClientProtocol, @unchecked Senda
     }
 
     public func createSession(model: String?, provider: String?) async throws -> SessionID { "preview-new" }
+    public func createSession(model: String?, provider: String?,
+                              profile: String?, title: String?) async throws -> SessionID { "preview-new" }
+    public func sessionID(titled title: String, profile: String?) async throws -> SessionID? {
+        guard title == AppModel.canonicalConversationTitle, scenario != .empty else { return nil }
+        return "preview-1"
+    }
+    public func mostRecentSession(profile: String?) async throws -> SessionID? {
+        scenario == .empty ? nil : "preview-1"
+    }
+    public func setSessionTitle(_ id: SessionID, title: String) async throws {}
     public func history(_ id: SessionID, limit: Int) async throws -> [TranscriptEntry] { [] }
     public func submit(session: SessionID, text: String) async throws {}
     public func steer(session: SessionID, text: String) async throws {}

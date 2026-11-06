@@ -30,7 +30,7 @@ final class UnpairedGatewayClient: GatewayClientProtocol, @unchecked Sendable {
     func disconnect() async {}
 
     /// No host, so there is no profile directory to list. Throwing leaves `bots` empty,
-    /// which is what the unpaired rail shows ("No host paired") — it never dials out.
+    /// which is what the unpaired sidebar shows ("No host paired") — it never dials out.
     func listBots() async throws -> [Bot] { throw Reason.noHost }
 
     func ping() async throws { throw Reason.noHost }

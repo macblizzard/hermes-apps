@@ -228,7 +228,7 @@ struct MacBotSettingsSheet: View {
             }
 
             Text(conversationIsOpen
-                 ? "This becomes the bot's default. The conversation you have open keeps the model it started with — reset it to use the new one."
+                 ? "This becomes the bot's default. The conversation you have open keeps the model it started with; its history is left unchanged."
                  : "This becomes the bot's default for new conversations with this bot.")
                 .font(TypeScale.font(TypeScale.caption))
                 .foregroundStyle(Tokens.textDim)

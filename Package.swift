@@ -19,6 +19,11 @@ let package = Package(
         .target(name: "HermesRender", dependencies: ["HermesKit"], path: "Sources/HermesRender"),
         // Shared application state consumed by both app shells.
         .target(name: "HermesAppKit", dependencies: ["HermesKit"], path: "Sources/HermesAppKit"),
+        // The macOS window surround is pure geometry, so the title-bar / safe-area arithmetic
+        // can be tested without launching a window or building the app target.
+        .target(name: "HermesMacChrome",
+                path: "Apps/HermesMac/Workspace",
+                sources: ["WorkspaceChrome.swift"]),
         // The phone's bridge voice client, compiled here (Foundation only, no SwiftUI)
         // so it can be unit-tested without an iOS simulator. The iOS target compiles
         // the same two files as part of the app module.
@@ -33,6 +38,7 @@ let package = Package(
 
         .testTarget(name: "HermesKitTests", dependencies: ["HermesKit"], path: "Tests/HermesKitTests"),
         .testTarget(name: "HermesAppKitTests", dependencies: ["HermesAppKit"], path: "Tests/HermesAppKitTests"),
+        .testTarget(name: "HermesMacChromeTests", dependencies: ["HermesMacChrome"], path: "Tests/HermesMacChromeTests"),
         .testTarget(name: "HermesRenderTests", dependencies: ["HermesRender"], path: "Tests/HermesRenderTests"),
         .testTarget(name: "HermesVoiceTests", dependencies: ["HermesVoiceCore"], path: "Tests/HermesVoiceTests"),
         .testTarget(name: "HermesAttachmentTests", dependencies: ["HermesAttachmentCore"], path: "Tests/HermesAttachmentTests"),

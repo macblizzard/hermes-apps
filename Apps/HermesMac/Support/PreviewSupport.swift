@@ -10,13 +10,11 @@ import SwiftUI
 /// card *in place*, not a hand-assembled mock that could drift from the real path.
 
 extension WorkspaceStore {
-    /// Attach the preview client: `start()` + open the first session, no pairing sheet.
+    /// Attach the preview client: `start()` + open the selected bot's shared conversation,
+    /// no pairing sheet and no session browser.
     func attachPreviewHost() async {
         await model.start()
-        await openFirstSessionIfNeeded()
-        if model.selectedSessionID == nil, let first = model.sessions.first {
-            await model.select(first.id)
-        }
+        await openSelectedBotConversation(force: true)
     }
 }
 

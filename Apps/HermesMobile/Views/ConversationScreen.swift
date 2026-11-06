@@ -10,8 +10,8 @@ import OpenBotUI
 /// There is no session browser here and none anywhere else: opening a bot asks the model
 /// for that bot's stored (or freshly created) session and attaches to it. The header is
 /// the bot, the model the host named, the wire latency and how full the context window is;
-/// the only two things you can do to the thread — compact it or reset it — sit behind the
-/// overflow menu, and resetting asks first.
+/// compaction sits behind the overflow menu. The thread is never reset or retitled
+/// automatically, so its history stays reachable.
 struct ConversationScreen: View {
     @ObservedObject var model: AppModel
     @EnvironmentObject private var app: AppEnvironment
@@ -21,7 +21,6 @@ struct ConversationScreen: View {
     @State private var sessionID: SessionID?
     @State private var isOpening = true
     @State private var showApprovalSheet = false
-    @State private var showResetConfirm = false
     @State private var notice: String?
     @State private var lastSeenRequestCount = 0
     @State private var hasLoaded = false
@@ -128,7 +127,6 @@ struct ConversationScreen: View {
                 bot: bot,
                 load: { botID in try await model.modelCatalog(for: botID) },
                 conversationIsOpen: true,
-                resetConversation: { model.resetEndlessSession(for: bot.id) },
                 save: { botID, option, confirmed in
                     switch try await model.configureModel(botID: botID, model: option.id,
                                                           provider: option.provider,
@@ -159,16 +157,6 @@ struct ConversationScreen: View {
         }
         .sheet(isPresented: $showApprovalSheet) {
             MobileApprovalSheet(model: model, request: model.pendingRequests.first)
-        }
-        .confirmationDialog("Reset this conversation?",
-                            isPresented: $showResetConfirm,
-                            titleVisibility: .visible) {
-            Button("Reset conversation", role: .destructive) {
-                Task { await resetConversation() }
-            }
-            Button("Keep it", role: .cancel) {}
-        } message: {
-            Text("This phone forgets its thread with \(title) and starts a new one on the next message. The old conversation stays on the host, and you can still open it there.")
         }
         .alert("Couldn’t add attachment", isPresented: noticeBinding) {
             Button("OK", role: .cancel) { notice = nil }
@@ -506,14 +494,6 @@ struct ConversationScreen: View {
                         Label("Compact now", systemImage: "arrow.down.right.and.arrow.up.left")
                     }
                     .disabled(sessionID == nil)
-
-                    Divider()
-
-                    Button(role: .destructive) {
-                        showResetConfirm = true
-                    } label: {
-                        Label("Reset conversation", systemImage: "arrow.counterclockwise")
-                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .foregroundStyle(Tokens.textSecondary)
@@ -691,24 +671,6 @@ struct ConversationScreen: View {
         // transcript, not in a sheet the user never asked for; only *arrivals* pop one.
         lastSeenRequestCount = model.pendingRequests.count
         hasLoaded = true
-        isOpening = false
-    }
-
-    /// Forget this bot's stored session and open a fresh one. The old session is left on
-    /// the host — resetting is a phone-side decision about what to continue from.
-    private func resetConversation() async {
-        Haptics.impact()
-        // Clears this bot's stored id and the thread on screen; the next open creates and
-        // stores a new session, so the composer is disabled until that lands.
-        model.resetEndlessSession(for: bot.id)
-        sessionID = nil
-        isOpening = true
-
-        if let sid = await model.endlessSession(for: bot.id) {
-            sessionID = sid
-        }
-
-        lastSeenRequestCount = model.pendingRequests.count
         isOpening = false
     }
 

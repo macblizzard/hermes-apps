@@ -548,6 +548,25 @@ final class GatewayClientTests: XCTestCase {
         XCTAssertEqual(interrupt?["session_id"]?.stringValue, "rt-1")
     }
 
+    /// Steer must use the same stored→runtime translation as submit, and must not quietly
+    /// become a second prompt when the caller is holding the stored id from the session list.
+    func testSteerAfterResumeAddressesTheRuntimeIDWithoutSubmitting() async throws {
+        let fake = FakeGateway()
+        let client = makeClient(fake)
+        try await client.connect()
+
+        _ = try await client.resumeSession("stored-1")
+        try await client.steer(session: "stored-1", text: "focus on the failing test")
+
+        let steer = await fake.params(method: "session.steer")
+        XCTAssertEqual(steer?["session_id"]?.stringValue, "rt-1",
+                       "the resumed session's runtime id, not the stored id the UI holds")
+        XCTAssertEqual(steer?["text"]?.stringValue, "focus on the failing test")
+        let methods = await fake.methods()
+        XCTAssertFalse(methods.contains("prompt.submit"),
+                       "a steer is never sent as prompt.submit")
+    }
+
     func testRewindCutsByRowIDAndNeverWipesSilently() async throws {
         let fake = FakeGateway()
         let client = makeClient(fake)
