@@ -54,9 +54,9 @@ struct ComposerTextView: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.minSize = NSSize(width: 0, height: minHeight)
-        textView.maxSize = NSSize(width: .greatestFiniteMagnitude, height: maxHeight)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: maxHeight)
         textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.containerSize = NSSize(width: 0, height: .greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         scroll.documentView = textView
 
         DispatchQueue.main.async { context.coordinator.resize(textView) }
