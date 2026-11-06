@@ -37,6 +37,9 @@ final class AppEnvironment: ObservableObject {
     @Published private(set) var devices: [PairedDevice] = []
     @Published private(set) var devicesLoading = false
     @Published private(set) var devicesError: String?
+    @Published private(set) var botIcons: [String: BotIcon] = [:]
+    @Published private(set) var botIconsError: String?
+    private var iconGeneration = 0
 
     private let bridge: BridgeServiceProtocol
     private let box: CredentialBox
@@ -106,6 +109,37 @@ final class AppEnvironment: ObservableObject {
     /// are the only thing this app lists now — there is no session list to keep in step.
     func loadBots() async {
         await model.loadBots()
+        await loadBotIcons()
+    }
+
+    private func iconService() throws -> (PairedHost, BotIconService) {
+        guard let host = store.host, let token = store.refreshToken else { throw BridgeError.noHost }
+        return (host, BotIconService(baseURL: host.baseURL, freshTicket: {
+            try await BotIconService.mintTicket(baseURL: host.baseURL, deviceID: host.deviceID, refreshToken: token)
+        }))
+    }
+
+    func loadBotIcons() async {
+        iconGeneration += 1
+        let generation = iconGeneration
+        do {
+            let (host, service) = try iconService()
+            let icons = try await service.load()
+            guard generation == iconGeneration, store.host == host, !isDisconnectedByUser else { return }
+            botIcons = icons
+            botIconsError = nil
+        } catch {
+            guard generation == iconGeneration, store.isPaired, !isDisconnectedByUser else { return }
+            botIconsError = message(for: error)
+        }
+    }
+
+    func saveBotIcon(botID: String, icon: BotIcon?) async throws {
+        let (host, service) = try iconService()
+        try await service.save(botID: botID, icon: icon)
+        guard store.host == host, !isDisconnectedByUser else { throw BridgeError.noHost }
+        await loadBotIcons()
+        if let error = botIconsError { throw NSError(domain: "BotIcons", code: 1, userInfo: [NSLocalizedDescriptionKey: "Saved, but could not refresh icons: \(error)"]) }
     }
 
     // MARK: - Lifecycle
@@ -118,6 +152,7 @@ final class AppEnvironment: ObservableObject {
         guard store.isPaired else { return }
         isDisconnectedByUser = false
         await model.start()
+        await loadBotIcons()
         await loadDevices()
         await model.refreshLatency()
     }
@@ -131,6 +166,7 @@ final class AppEnvironment: ObservableObject {
         await syncCredentials()
         // `retryConnection` keeps the open session selected across the reconnect.
         await model.retryConnection()
+        await loadBotIcons()
         await loadDevices()
         await model.refreshLatency()
     }
@@ -165,10 +201,14 @@ final class AppEnvironment: ObservableObject {
                                                host: host,
                                                deviceName: deviceName.isEmpty ? defaultDeviceName : deviceName)
             store.save(host: claim.host, refreshToken: claim.refreshToken)
+            iconGeneration += 1
+            botIcons = [:]
+            botIconsError = nil
             await box.update(host: claim.host, token: claim.refreshToken)
             Haptics.success()
             isDisconnectedByUser = false
             await model.start()
+            await loadBotIcons()
             await loadDevices()
             await model.refreshLatency()
             return true
@@ -180,6 +220,9 @@ final class AppEnvironment: ObservableObject {
     }
 
     func unpair() async {
+        iconGeneration += 1
+        botIcons = [:]
+        botIconsError = nil
         await model.stop()
         store.clear()
         await box.update(host: nil, token: nil)
@@ -193,6 +236,9 @@ final class AppEnvironment: ObservableObject {
     /// this next to *Re-pair*, which is the action that replaces the credentials.
     func disconnect() async {
         isDisconnectedByUser = true
+        iconGeneration += 1
+        botIcons = [:]
+        botIconsError = nil
         await model.stop()
     }
 

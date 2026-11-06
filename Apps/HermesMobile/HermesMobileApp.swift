@@ -47,11 +47,11 @@ struct RootTabView: View {
             // A phone comes back from the background with a dead socket; reconnect once
             // rather than waiting for the user to shake it. A host the user disconnected on
             // purpose stays disconnected — that is a choice, not a dropped socket.
-            guard phase == .active,
-                  app.isPaired,
-                  !app.isDisconnectedByUser,
-                  !app.model.connection.isLive else { return }
-            Task { await app.reconnect() }
+            guard phase == .active, app.isPaired, !app.isDisconnectedByUser else { return }
+            Task {
+                if app.model.connection.isLive { await app.loadBotIcons() }
+                else { await app.reconnect() }
+            }
         }
     }
 }

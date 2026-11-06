@@ -393,6 +393,37 @@ public actor GatewayClient: GatewayClientProtocol {
         return try GatewayPayloadDecoder.modelCatalog(result)
     }
 
+    public func modelCatalog(profile: String?) async throws -> ModelCatalog {
+        var params: [String: JSONValue] = [:]
+        if let profile, !profile.isEmpty { params["profile"] = .string(profile) }
+        let result = try await perform("model.options", params: .object(params), timeout: timeouts.call)
+        return try GatewayPayloadDecoder.modelCatalog(result)
+    }
+
+    /// `profiles.configure`, model section only. The bridge refuses every other section, so this
+    /// can change a bot's model and nothing else about it.
+    public func configureModel(profile: String, model: String, provider: String,
+                               confirm: Bool) async throws -> ProfileModelChange {
+        var params: [String: JSONValue] = [
+            "name": .string(profile),
+            "model": .string(model),
+            "provider": .string(provider),
+        ]
+        if confirm { params["confirm_expensive_model"] = .bool(true) }
+        let result = try await perform("profiles.configure", params: .object(params),
+                                       timeout: timeouts.sessionResume)
+        if result?["confirm_required"]?.boolValue == true {
+            let message = result?["confirm_message"]?.stringValue
+            return .confirmationRequired(message: message ?? "The host wants confirmation for this model.")
+        }
+        guard result?["ok"]?.boolValue != false else {
+            throw GatewayError.malformedResponse(method: "profiles.configure")
+        }
+        let applied = result?["applied"]?.objectValue
+        return .applied(model: applied?["model"]?.stringValue ?? model,
+                        provider: applied?["provider"]?.stringValue ?? provider)
+    }
+
     // MARK: Compaction
 
     /// `session.compress` with the **runtime** id.

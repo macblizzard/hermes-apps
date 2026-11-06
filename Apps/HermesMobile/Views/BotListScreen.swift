@@ -16,10 +16,13 @@ struct BotListScreen: View {
     @ObservedObject var model: AppModel
     /// Called when a row is chosen, so the tab can push that bot's conversation.
     var onOpenBot: (Bot) -> Void = { _ in }
-
     @EnvironmentObject private var app: AppEnvironment
 
     @State private var query = ""
+    @State private var iconBot: Bot?
+    /// Long-press → Bot Settings. Presented from this screen so the settings flow needs no
+    /// plumbing from the tab, and so a long-press can never accidentally open the chat.
+    @State private var settingsBot: Bot?
     @AppStorage("lastOpenedBotsByHost") private var lastOpenedBotsJSON = "{}"
 
     private var lastOpenedBots: [String: String] {
@@ -59,6 +62,9 @@ struct BotListScreen: View {
 
     var body: some View {
         List {
+            if let error = app.botIconsError {
+                Text("Could not refresh bot icons: \(error)").font(.caption).foregroundStyle(.red)
+            }
             if model.botsLoading && model.bots.isEmpty {
                 loadingRow
             } else if filtered.isEmpty {
@@ -80,6 +86,27 @@ struct BotListScreen: View {
             await app.loadBots()
         }
         .toolbar { toolbarContent }
+        .sheet(item: $settingsBot) { bot in
+            BotModelSettingsScreen(
+                bot: bot,
+                load: { botID in try await model.modelCatalog(for: botID) },
+                save: { botID, option, confirmed in
+                    switch try await model.configureModel(botID: botID,
+                                                          model: option.id,
+                                                          provider: option.provider,
+                                                          confirm: confirmed) {
+                    case .applied:
+                        return .saved
+                    case .confirmationRequired(let message):
+                        return .confirmationRequired(message)
+                    }
+                })
+        }
+        .sheet(item: $iconBot) { bot in
+            BotIconPicker(botName: bot.displayName, selected: app.botIcons[bot.id]) { icon in
+                try await app.saveBotIcon(botID: bot.id, icon: icon)
+            }
+        }
         .mobileConnectionBanner(connection: app.visibleConnection,
                                 turnRunning: model.isStreaming,
                                 host: app.hostLabel,
@@ -95,10 +122,14 @@ struct BotListScreen: View {
             onOpenBot(bot)
         } label: {
             HStack(spacing: 12) {
-                Avatar(bot.displayName,
+                if let icon = app.botIcons[bot.id] {
+                    BotIconPortrait(icon, size: 48)
+                } else {
+                    Avatar(bot.displayName,
                        size: .large,
                        presence: .idle,
                        initials: bot.avatarInitials)
+                }
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(bot.displayName)
@@ -130,6 +161,10 @@ struct BotListScreen: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            Button { iconBot = bot } label: { Label("Bot icon", systemImage: "person.crop.circle") }
+            Button { settingsBot = bot } label: { Label("Bot Settings", systemImage: "gearshape") }
+        }
         .listRowBackground(Tokens.canvas)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))

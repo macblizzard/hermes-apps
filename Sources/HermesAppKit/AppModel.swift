@@ -609,6 +609,30 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Per-bot model
+
+    /// The model menu for one bot. Scoped, because each profile has its own catalogue and its own
+    /// current model — asking globally answers for whichever profile the host defaults to.
+    public func modelCatalog(for botID: String) async throws -> ModelCatalog {
+        try await client.modelCatalog(profile: botID)
+    }
+
+    /// Set a bot's profile default model.
+    ///
+    /// The running conversation is left alone: the host applies the default to unpinned turns, and
+    /// a session-level override (if the user ever set one) still wins. When the bot being changed is
+    /// the one on screen, its chip is refreshed so the header stops showing the old model.
+    @discardableResult
+    public func configureModel(botID: String, model: String, provider: String,
+                               confirm: Bool) async throws -> ProfileModelChange {
+        let change = try await client.configureModel(profile: botID, model: model,
+                                                      provider: provider, confirm: confirm)
+        if case .applied = change, botID == selectedBotID {
+            await loadModelLabel()
+        }
+        return change
+    }
+
     // MARK: Latency
 
     /// Round-trip time of one real request, for the connection chip.

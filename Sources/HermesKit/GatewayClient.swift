@@ -80,6 +80,18 @@ public protocol GatewayClientProtocol: AnyObject, Sendable {
     /// on `opencode-go`). Reading `providers[0].models[0]` is what put the wrong chip on screen.
     func modelCatalog() async throws -> ModelCatalog
 
+    /// `model.options` scoped to one bot.
+    ///
+    /// The catalogue is per profile: each bot can run a different model, so asking without a
+    /// profile answers for whichever profile the gateway happens to default to.
+    func modelCatalog(profile: String?) async throws -> ModelCatalog
+
+    /// Set a bot's **profile default** model (`profiles.configure`, model section only).
+    ///
+    /// This does not touch an existing conversation: a live session may carry its own model
+    /// override, and the host only adopts the new default for turns that are not pinned.
+    func configureModel(profile: String, model: String, provider: String, confirm: Bool) async throws -> ProfileModelChange
+
     // Compaction
     /// `session.compress` — ask the host to summarise the session into a smaller context.
     ///
@@ -148,6 +160,18 @@ public struct Bot: Identifiable, Hashable, Sendable {
 }
 
 public extension GatewayClientProtocol {
+    /// Conformers with no notion of a bot (previews, the unpaired stub, tests) keep the global call.
+    func modelCatalog(profile: String?) async throws -> ModelCatalog {
+        try await modelCatalog()
+    }
+
+    /// Stubs have no profiles to configure; say so instead of pretending the change landed.
+    func configureModel(profile: String, model: String, provider: String, confirm: Bool) async throws -> ProfileModelChange {
+        _ = (profile, model, provider, confirm)
+        throw GatewayError.rpc(RPCError(code: -32601,
+                                        message: "this client cannot configure a profile"))
+    }
+
     /// Conformers with no notion of a bot (previews, the unpaired stub, tests) keep the plain call.
     func resumeSession(_ id: SessionID, profile: String?) async throws -> SessionResume {
         try await resumeSession(id)
@@ -307,6 +331,18 @@ public struct ModelOption: Identifiable, Hashable, Sendable {
         self.provider = provider
         self.label = label
     }
+}
+
+/// The outcome of asking the host to change a bot's default model.
+///
+/// `profiles.configure` answers `{ok, applied, confirm_required?, confirm_message?}`: a model the
+/// host considers expensive is refused the first time and only lands when the same call is repeated
+/// with `confirm_expensive_model: true`. A transport-level success is not an applied change, so the
+/// client returns this instead of a bare `Void`.
+public enum ProfileModelChange: Equatable, Sendable {
+    case applied(model: String, provider: String)
+    /// The host wants explicit consent before it will honour this model.
+    case confirmationRequired(message: String)
 }
 
 /// What `model.options` actually answers: everything the host can run, plus the one it *is*

@@ -140,12 +140,14 @@ def bridge_factory(tmp_path, fake_gateway):
         frame_cap: int | None = None,
         connect_timeout: float = 3.0,
         gateway_token: str | None = GATEWAY_TOKEN,
+        extra_client_methods: frozenset[str] = frozenset(),
     ) -> LiveBridge:
         config = BridgeConfig(
             db_path=tmp_path / f"bridge-{next(counter)}.db",
             gateway_url=gateway_url or fake_gateway.url,
             gateway_token=gateway_token,
             connect_timeout=connect_timeout,
+            extra_client_methods=extra_client_methods,
             frame_cap=frame_cap or DEFAULT_FRAME_CAP,
         )
         config.validate()

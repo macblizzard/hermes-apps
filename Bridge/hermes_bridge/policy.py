@@ -36,6 +36,7 @@ CLIENT_METHODS = frozenset(
         # `session.list` with `profile` so one gateway serves every bot.
         "profiles.list",
         "profiles.describe",
+        "profiles.configure",
         # sessions
         "session.list",
         "session.active_list",
@@ -72,6 +73,8 @@ CLIENT_METHODS = frozenset(
         "clarify.respond",
         "connection.respond",
         # composer / discovery
+        "file.attach",
+        "image.attach_bytes",
         "complete.slash",
         "complete.path",
         "commands.catalog",
@@ -97,6 +100,18 @@ SERVER_REQUEST_METHODS = frozenset(
 )
 
 _METHOD_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+
+
+def is_bot_model_configure_allowed(params: object) -> bool:
+    """Expose only the model section of the gateway's broad profile editor."""
+    if not isinstance(params, dict):
+        return False
+    if set(params) - {"name", "model", "provider", "confirm_expensive_model"}:
+        return False
+    if not all(isinstance(params.get(key), str) and params[key].strip()
+               for key in ("name", "model", "provider")):
+        return False
+    return "confirm_expensive_model" not in params or type(params["confirm_expensive_model"]) is bool
 
 
 def is_valid_method_name(method: object) -> TypeGuard[str]:

@@ -33,6 +33,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from pydantic import BaseModel, Field
 
 from .audit import AuditLog
+from .bot_icons import create_bot_icons_router
 from .config import BridgeConfig, is_loopback_host
 from .pairing import InvalidPublicKey, normalize_public_key
 from .proxy import GatewayProxy, LiveSessions
@@ -139,15 +140,17 @@ def create_app(
 
     app = FastAPI(title="hermes-bridge", version="0.2.0", lifespan=lifespan)
     app.state.bridge = runtime
+    app.include_router(create_bot_icons_router(runtime))
 
     @app.middleware("http")
     async def no_store(request: Request, call_next):
         started = time.perf_counter()
+        audit_path = "/v1/bot-icons/{bot_id}" if request.url.path.startswith("/v1/bot-icons/") else request.url.path
         try:
             response = await call_next(request)
         except Exception:
             if request.url.path.startswith("/v1/"):
-                runtime.audit.emit("http", method=request.method, path=request.url.path,
+                runtime.audit.emit("http", method=request.method, path=audit_path,
                                    outcome="500", duration_ms=time.perf_counter() - started)
             raise
         if request.url.path.startswith("/v1/"):
@@ -157,7 +160,7 @@ def create_app(
             # audit log only covered the websocket, so "the app says the host does not know this
             # device" could not be traced to a request or a status code. Record method, path,
             # status and duration — still no bodies and no headers, so no code or token leaks.
-            runtime.audit.emit("http", method=request.method, path=request.url.path,
+            runtime.audit.emit("http", method=request.method, path=audit_path,
                                outcome=str(response.status_code),
                                duration_ms=time.perf_counter() - started)
         return response

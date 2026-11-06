@@ -36,12 +36,14 @@ from typing import Optional
 import websockets
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from .attachment_validation import ATTACHMENT_METHODS, AttachmentError, validate_attachment_request
 from .audit import AuditLog
 from .config import BridgeConfig
 from .policy import (
     build_client_allow_list,
     is_server_request_allowed,
     is_valid_method_name,
+    is_bot_model_configure_allowed,
 )
 
 # Close codes: 4401 is "re-authenticate" (bridge-defined), the rest are RFC 6455.
@@ -359,7 +361,10 @@ class GatewayProxy:
             )
             return
 
-        if not is_valid_method_name(method) or method not in self._allow:
+        if (not is_valid_method_name(method) or method not in self._allow
+                or (method in {"image.attach", "pdf.attach", "clipboard.paste", "image.detach"})
+                or (method == "profiles.configure"
+                    and not is_bot_model_configure_allowed(frame.get("params")))):
             shown = method if is_valid_method_name(method) else None
             await self._send_error_to_client(
                 request_id,
@@ -375,6 +380,13 @@ class GatewayProxy:
                 direction="client_to_gateway",
             )
             return
+
+        if method in ATTACHMENT_METHODS:
+            try:
+                validate_attachment_request(method, frame.get("params"))
+            except AttachmentError:
+                await self._send_error_to_client(request_id, -32602, "invalid attachment")
+                return
 
         if key in self._pending:
             await self._send_error_to_client(
@@ -599,6 +611,22 @@ class GatewayProxy:
                 nbytes=len(raw),
                 direction="gateway_to_client",
             )
+        if pending is not None and pending.method == "profiles.configure" and frame.get("error"):
+            frame = dict(frame)
+            frame["error"] = {"code": -32603, "message": "profile model update failed"}
+        if pending is not None and pending.method in ATTACHMENT_METHODS:
+            frame = dict(frame)
+            if frame.get("error"):
+                frame["error"] = {"code": -32603, "message": "attachment failed"}
+            elif isinstance(frame.get("result"), dict):
+                result = dict(frame["result"])
+                result.pop("path", None)
+                ref = result.get("ref_path")
+                if isinstance(ref, str) and (ref.startswith(("/", "\\\\")) or (len(ref) > 1 and ref[1] == ":")):
+                    frame.pop("result", None)
+                    frame["error"] = {"code": -32603, "message": "attachment reference unavailable"}
+                else:
+                    frame["result"] = result
         await self._send_to_client(self._encode(frame))
 
     # -- transport helpers -------------------------------------------------
