@@ -18,6 +18,7 @@ struct WorkspaceRoot: View {
     @ObservedObject var store: WorkspaceStore
 
     var body: some View {
+        let _ = NSLog("[uitest] WorkspaceRoot body evaluated")
         ZStack {
             Tokens.frame
                 .ignoresSafeArea()
