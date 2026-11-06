@@ -29,7 +29,7 @@ struct ConversationScreen: View {
     @State private var keyboardScreenSize: CGSize = .zero
     @State private var keyboardScrollTask: Task<Void, Never>?
     @State private var isDraggingTranscript = false
-    @State private var showAttachmentPicker = false
+    @State private var showAttachmentMenu = false
     @State private var attachmentSource: AttachmentSource?
     @State private var showFileImporter = false
 
@@ -48,12 +48,6 @@ struct ConversationScreen: View {
     private static let bottomID = "conversation-bottom"
     private static let streamingSearchID = "conversation-streaming-search"
 
-    /// The two system pickers that need their own presentation; Files uses `.fileImporter`.
-    enum AttachmentSource: String, Identifiable {
-        case camera, photos
-        var id: String { rawValue }
-    }
-
     private func accept(_ result: Result<AttachmentPayload, Error>) {
         attachmentSource = nil
         switch result {
@@ -64,10 +58,54 @@ struct ConversationScreen: View {
         }
     }
 
+    /// The menu closes before the picker opens: they are separate presentations and the
+    /// overlay must not sit on top of a system sheet.
+    private func pick(_ source: AttachmentSource) {
+        closeAttachmentMenu()
+        switch source {
+        case .camera:
+            guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+                notice = AttachmentPickerError.cameraUnavailable.localizedDescription
+                return
+            }
+            attachmentSource = .camera
+        case .photos:
+            attachmentSource = .photos
+        case .files:
+            showFileImporter = true
+        }
+    }
+
+    private func closeAttachmentMenu() {
+        showAttachmentMenu = false
+    }
+
+    /// A picked file is read off the main thread — a coordinated read of a 40 MB HEIC and its
+    /// downsample is long enough to freeze the composer — and the scope is released only after
+    /// the bytes are in memory.
+    private func importFile(at url: URL) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let result: Result<AttachmentPayload, Error>
+            do { result = .success(try AttachmentRead.file(at: url)) } catch { result = .failure(error) }
+            DispatchQueue.main.async { accept(result) }
+        }
+    }
+
     private var title: String { bot.displayName }
 
     var body: some View {
         transcriptScroll
+        // Tapping the thread closes the paperclip's menu, the way any transient menu behaves.
+        .overlay {
+            if showAttachmentMenu {
+                Color.black.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .onTapGesture { closeAttachmentMenu() }
+                    .accessibilityHidden(true)
+            }
+        }
         .background(Tokens.canvas)
         .safeAreaInset(edge: .bottom, spacing: 0) { composerArea }
         .mobileConnectionBanner(connection: app.visibleConnection,
@@ -118,32 +156,25 @@ struct ConversationScreen: View {
                     try await model.configureDescription(botID: botID, description: text)
                 })
         }
-        // A paperclip tap is a three-way choice, not a page: an action sheet, then the system
-        // picker for the one the user chose.
-        .confirmationDialog("Add attachment", isPresented: $showAttachmentPicker,
-                            titleVisibility: .visible) {
-            Button("Camera") { attachmentSource = .camera }
-            Button("Photos") { attachmentSource = .photos }
-            Button("Files") { showFileImporter = true }
-            Button("Cancel", role: .cancel) {}
-        }
+        // The choices live in the composer, anchored to the paperclip (`AttachmentMenu`); this
+        // is only the system picker for the one the user chose.
         .sheet(item: $attachmentSource) { source in
             switch source {
             case .camera:
-                AttachmentCamera { accept($0) }.ignoresSafeArea()
+                AttachmentCamera(completion: { accept($0) },
+                                 cancel: { attachmentSource = nil }).ignoresSafeArea()
             case .photos:
-                AttachmentPhotos { accept($0) }.ignoresSafeArea()
+                AttachmentPhotos(completion: { accept($0) },
+                                 cancel: { attachmentSource = nil }).ignoresSafeArea()
+            case .files:
+                // Files is a `.fileImporter`, never a sheet; `pick` never routes it here.
+                EmptyView()
             }
         }
         .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item]) { result in
             switch result {
             case .success(let url):
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                let isImage = (try? url.resourceValues(forKeys: [.contentTypeKey])
-                    .contentType?.conforms(to: .image)) ?? false
-                do { accept(.success(try AttachmentRead.file(url, isImage: isImage))) }
-                catch { accept(.failure(error)) }
+                importFile(at: url)
             case .failure(let error):
                 accept(.failure(error))
             }
@@ -161,7 +192,7 @@ struct ConversationScreen: View {
         } message: {
             Text("This phone forgets its thread with \(title) and starts a new one on the next message. The old conversation stays on the host, and you can still open it there.")
         }
-        .alert("Not yet", isPresented: noticeBinding) {
+        .alert("Couldn’t add attachment", isPresented: noticeBinding) {
             Button("OK", role: .cancel) { notice = nil }
         } message: {
             Text(notice ?? "")
@@ -554,12 +585,27 @@ struct ConversationScreen: View {
                      isSending: model.isBusy,
                      isDisabled: sessionID == nil,
                      onSend: { Task { await model.send() } },
-                     onAttach: { showAttachmentPicker = true },
+                     onAttach: {
+                         withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+                             showAttachmentMenu.toggle()
+                         }
+                     },
                      onMic: { toggleRecording() },
                      onInterrupt: { Task { await model.interrupt() } })
                 .padding(.horizontal, 12)
                 .padding(.top, 8)
                 .padding(.bottom, 8)
+                // Anchored to the paperclip, above it: the card is an overlay, not a
+                // presentation, so nothing here can be dismissed out from under it.
+                .overlay(alignment: .topLeading) {
+                    if showAttachmentMenu {
+                        AttachmentMenu(onPick: pick)
+                            .padding(.leading, 4)
+                            .offset(y: -(AttachmentMenu.height + 10))
+                            .transition(.scale(scale: 0.9, anchor: .bottomLeading)
+                                .combined(with: .opacity))
+                    }
+                }
         }
         .background(Tokens.canvas)
     }

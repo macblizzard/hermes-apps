@@ -1,59 +1,30 @@
-import SwiftUI
+import Foundation
 import PhotosUI
+import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 
-/// Present as a sheet, then upload the returned payload through the paired socket.
-/// Selection and transfer are intentionally separate: no attachment is sent on pick.
-struct AttachmentPicker: View {
-    let onResult: (Result<AttachmentPayload, Error>) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var source: Source?
-    @State private var showFiles = false
+/// The three things the paperclip offers. The menu renders them in this order, and each one
+/// maps to exactly one system picker.
+enum AttachmentSource: String, CaseIterable, Identifiable {
+    case camera, photos, files
 
-    private enum Source: String, Identifiable {
-        case camera, photos
-        var id: String { rawValue }
-    }
+    var id: String { rawValue }
 
-    var body: some View {
-        NavigationStack {
-            List {
-                Button("Camera", systemImage: "camera") {
-                    guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
-                        finish(.failure(AttachmentPickerError.cameraUnavailable)); return
-                    }
-                    source = .camera
-                }
-                Button("Photos", systemImage: "photo") { source = .photos }
-                Button("Files", systemImage: "folder") { showFiles = true }
-            }
-            .navigationTitle("Add attachment")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-            .sheet(item: $source) { choice in
-                if choice == .camera {
-                    AttachmentCamera { result in finish(result) }
-                        .ignoresSafeArea()
-                } else {
-                    AttachmentPhotos { result in finish(result) }
-                        .ignoresSafeArea()
-                }
-            }
-            .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item]) { result in
-                do {
-                    let url = try result.get()
-                    let scoped = url.startAccessingSecurityScopedResource()
-                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                    let image = (try? url.resourceValues(forKeys: [.contentTypeKey]).contentType?.conforms(to: .image)) ?? false
-                    finish(.success(try AttachmentRead.file(url, isImage: image)))
-                } catch { finish(.failure(error)) }
-            }
+    var title: String {
+        switch self {
+        case .camera: return "Camera"
+        case .photos: return "Photo Library"
+        case .files: return "File"
         }
     }
 
-    private func finish(_ result: Result<AttachmentPayload, Error>) {
-        onResult(result)
-        dismiss()
+    var systemImage: String {
+        switch self {
+        case .camera: return "camera"
+        case .photos: return "photo.on.rectangle"
+        case .files: return "folder"
+        }
     }
 }
 
@@ -63,48 +34,166 @@ enum AttachmentPickerError: LocalizedError {
         switch self {
         case .cameraUnavailable: return "The camera is unavailable on this device."
         case .noImage: return "The camera did not provide a photo."
-        case .unsupportedPhoto: return "The selected photo could not be loaded."
+        case .unsupportedPhoto: return "That photo could not be loaded."
         }
     }
 }
 
+/// Reading one file the document picker handed back.
+///
+/// The picker's URL is security-scoped and only valid for the duration of its callback, and
+/// providers (iCloud Drive, third-party storage) may not have downloaded the item yet. The
+/// read therefore goes through `NSFileCoordinator`, which also triggers the download, and the
+/// scope is released only after the bytes are in memory. Every failure is thrown — nothing is
+/// swallowed with `try?` — so the composer can say what went wrong.
 enum AttachmentRead {
-    static func file(_ url: URL, isImage: Bool) throws -> AttachmentPayload {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        let bytes = try handle.read(upToCount: AttachmentPayload.maximumBytes + 1) ?? Data()
-        guard !bytes.isEmpty else { throw AttachmentPayload.Failure.empty }
-        guard bytes.count <= AttachmentPayload.maximumBytes else { throw AttachmentPayload.Failure.tooLarge }
-        return AttachmentPayload(name: url.lastPathComponent, data: bytes, isImage: isImage)
+    static func file(at url: URL) throws -> AttachmentPayload {
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .fileSizeKey, .contentTypeKey,
+                                         .nameKey, .isUbiquitousItemKey,
+                                         .ubiquitousItemIsDownloadedKey]
+        var values = try? url.resourceValues(forKeys: keys)
+        if values?.isDirectory == true { throw AttachmentBudgetError.unsupportedFile }
+
+        // An iCloud Drive item that is not on the device is a placeholder: every read of it
+        // fails with ENOENT until something asks a coordinator for it. That is why picking a
+        // file from Files could appear to do nothing at all.
+        let isPlaceholder = values?.isUbiquitousItem == true && values?.ubiquitousItemIsDownloaded == false
+        if isPlaceholder || values?.fileSize == nil {
+            try ensureMaterialised(url)
+            values = try? url.resourceValues(forKeys: keys)
+        }
+
+        let isImage = self.isImage(url: url, contentType: values?.contentType)
+        if isImage {
+            do {
+                return try AttachmentImageEncoder.payload(from: url)
+            } catch AttachmentBudgetError.unsupportedFile {
+                // A file the image pipeline cannot decode is still sendable as raw bytes.
+            }
+        }
+
+        if let declared = values?.fileSize, declared > AttachmentBudget.maximumBytes {
+            throw AttachmentBudgetError.tooLarge(byteCount: declared,
+                                                 maximumBytes: AttachmentBudget.maximumBytes)
+        }
+
+        let data = try coordinatedRead(url, limit: AttachmentBudget.maximumBytes)
+
+        // The path component carries the extension; `nameKey` is only a fallback for the rare
+        // URL whose last component is empty.
+        let rawName = url.lastPathComponent.isEmpty ? (values?.name ?? "") : url.lastPathComponent
+        guard let name = AttachmentName.sanitized(rawName) else {
+            throw AttachmentBudgetError.invalidName
+        }
+        return AttachmentPayload(name: name, data: data, isImage: isImage)
+    }
+
+    /// `contentType` is often `nil` on provider URLs, so the extension is the fallback rather
+    /// than the answer.
+    static func isImage(url: URL, contentType: UTType?) -> Bool {
+        if let contentType { return contentType.conforms(to: .image) }
+        if let type = UTType(filenameExtension: url.pathExtension) { return type.conforms(to: .image) }
+        return false
+    }
+
+    /// Opens the item through a coordinator and reads a byte, which is enough to make the
+    /// provider materialise it locally.
+    private static func ensureMaterialised(_ url: URL) throws {
+        var coordinationError: NSError?
+        var readError: Error?
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
+            do {
+                let handle = try FileHandle(forReadingFrom: readable)
+                defer { try? handle.close() }
+                _ = try handle.read(upToCount: 1)
+            } catch {
+                readError = error
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        if let readError { throw readError }
+    }
+
+    /// Reads at most `limit + 1` bytes, so an unknown-size 2 GB video cannot be pulled into
+    /// memory before it is refused.
+    private static func coordinatedRead(_ url: URL, limit: Int) throws -> Data {
+        var coordinationError: NSError?
+        var readError: Error?
+        var data = Data()
+        var overLimit = false
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
+            do {
+                let handle = try FileHandle(forReadingFrom: readable)
+                defer { try? handle.close() }
+                let chunkSize = 1024 * 1024
+                while data.count <= limit {
+                    guard let chunk = try handle.read(upToCount: min(chunkSize, limit + 1 - data.count)),
+                          !chunk.isEmpty else { break }
+                    data.append(chunk)
+                }
+                overLimit = data.count > limit
+            } catch {
+                readError = error
+            }
+        }
+        if let coordinationError { throw coordinationError }
+        if let readError { throw readError }
+        if overLimit || data.count > limit {
+            throw AttachmentBudgetError.tooLarge(byteCount: data.count, maximumBytes: limit)
+        }
+        try AttachmentBudget.validate(byteCount: data.count)
+        return data
     }
 }
 
 struct AttachmentPhotos: UIViewControllerRepresentable {
     let completion: (Result<AttachmentPayload, Error>) -> Void
-    func makeCoordinator() -> Coordinator { Coordinator(completion: completion) }
+    let cancel: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(completion: completion, cancel: cancel) }
+
     func makeUIViewController(context: Context) -> PHPickerViewController {
         var config = PHPickerConfiguration()
         config.filter = .images
         config.selectionLimit = 1
+        config.preferredAssetRepresentationMode = .current
         let picker = PHPickerViewController(configuration: config)
         picker.delegate = context.coordinator
         return picker
     }
+
     func updateUIViewController(_ controller: PHPickerViewController, context: Context) {}
+
     final class Coordinator: NSObject, PHPickerViewControllerDelegate {
         let completion: (Result<AttachmentPayload, Error>) -> Void
-        init(completion: @escaping (Result<AttachmentPayload, Error>) -> Void) { self.completion = completion }
+        let cancel: () -> Void
+
+        init(completion: @escaping (Result<AttachmentPayload, Error>) -> Void,
+             cancel: @escaping () -> Void) {
+            self.completion = completion
+            self.cancel = cancel
+        }
+
         func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-            guard let provider = results.first?.itemProvider else { picker.dismiss(animated: true); return }
+            guard let provider = results.first?.itemProvider else {
+                // Cancelled: without this the SwiftUI sheet stays up forever.
+                DispatchQueue.main.async { self.cancel() }
+                return
+            }
             guard let type = provider.registeredTypeIdentifiers.first(where: { UTType($0)?.conforms(to: .image) == true }) else {
-                completion(.failure(AttachmentPickerError.unsupportedPhoto)); return
+                DispatchQueue.main.async { self.completion(.failure(AttachmentPickerError.unsupportedPhoto)) }
+                return
             }
             provider.loadFileRepresentation(forTypeIdentifier: type) { url, error in
+                // The provider's file is deleted when this closure returns, so the encode
+                // happens here and only the resulting payload crosses back to the main queue.
                 let result: Result<AttachmentPayload, Error>
                 do {
                     guard let url else { throw error ?? AttachmentPickerError.unsupportedPhoto }
-                    result = .success(try AttachmentRead.file(url, isImage: true))
-                } catch { result = .failure(error) }
+                    result = .success(try AttachmentImageEncoder.payload(from: url))
+                } catch {
+                    result = .failure(error)
+                }
                 DispatchQueue.main.async { self.completion(result) }
             }
         }
@@ -113,26 +202,44 @@ struct AttachmentPhotos: UIViewControllerRepresentable {
 
 struct AttachmentCamera: UIViewControllerRepresentable {
     let completion: (Result<AttachmentPayload, Error>) -> Void
-    func makeCoordinator() -> Coordinator { Coordinator(completion: completion) }
+    let cancel: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(completion: completion, cancel: cancel) }
+
     func makeUIViewController(context: Context) -> UIImagePickerController {
         let picker = UIImagePickerController()
         picker.sourceType = .camera
         picker.delegate = context.coordinator
         return picker
     }
+
     func updateUIViewController(_ controller: UIImagePickerController, context: Context) {}
+
     final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
         let completion: (Result<AttachmentPayload, Error>) -> Void
-        init(completion: @escaping (Result<AttachmentPayload, Error>) -> Void) { self.completion = completion }
-        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { picker.dismiss(animated: true) }
-        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
-            guard let image = info[.originalImage] as? UIImage else { completion(.failure(AttachmentPickerError.noImage)); return }
-            for quality in [CGFloat(0.8), 0.6, 0.4, 0.2] {
-                if let data = image.jpegData(compressionQuality: quality), data.count <= AttachmentPayload.maximumBytes {
-                    completion(.success(AttachmentPayload(name: "camera.jpg", data: data, isImage: true))); return
-                }
+        let cancel: () -> Void
+
+        init(completion: @escaping (Result<AttachmentPayload, Error>) -> Void,
+             cancel: @escaping () -> Void) {
+            self.completion = completion
+            self.cancel = cancel
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            cancel()
+        }
+
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            guard let image = info[.originalImage] as? UIImage else {
+                completion(.failure(AttachmentPickerError.noImage))
+                return
             }
-            completion(.failure(AttachmentPayload.Failure.tooLarge))
+            do {
+                completion(.success(try AttachmentImageEncoder.payload(from: image)))
+            } catch {
+                completion(.failure(error))
+            }
         }
     }
 }

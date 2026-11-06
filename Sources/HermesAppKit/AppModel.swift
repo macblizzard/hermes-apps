@@ -505,8 +505,11 @@ public final class AppModel: ObservableObject {
         }
     }
 
-    /// The host's byte limit for one attachment (`AttachmentPayload.maximumBytes` on the bridge).
-    public static let maxAttachmentBytes = 512 * 1024
+    /// The client's byte limit for one attachment, in sync with
+    /// `AttachmentBudget.maximumBytes` in the phone app (8 MiB decoded, which encodes to
+    /// ~10.7 MiB and fits one 16 MiB websocket frame). The modules cannot share the symbol,
+    /// so the number is duplicated here on purpose — change all three together.
+    public static let maxAttachmentBytes = 8 * 1024 * 1024
 
     public func addPendingAttachment(name: String, data: Data, isImage: Bool) {
         guard !data.isEmpty else {
@@ -514,7 +517,7 @@ public final class AppModel: ObservableObject {
             return
         }
         guard data.count <= Self.maxAttachmentBytes else {
-            lastSendError = "That attachment is larger than the 512 KiB limit."
+            lastSendError = "That attachment is larger than the 8 MB limit."
             return
         }
         pendingAttachments.append(PendingAttachment(name: name, isImage: isImage, data: data))

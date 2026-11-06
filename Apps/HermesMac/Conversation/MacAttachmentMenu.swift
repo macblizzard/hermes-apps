@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 ///
 /// The phone opens an action sheet and then a system picker; on the Mac the picker *is* the panel,
 /// so the menu is two items in a popover — no page, no sheet, and no upload on pick. The bytes are
-/// handed to `AppModel.addPendingAttachment`, which is where the 512 KiB limit and the empty-file
+/// handed to `AppModel.addPendingAttachment`, which is where the size limit and the empty-file
 /// check live, so both platforms validate the same way.
 struct MacAttachmentMenu: View {
     @ObservedObject var model: AppModel
@@ -103,7 +103,7 @@ struct MacAttachmentFile {
             case .empty:
                 return "The selected file is empty."
             case .tooLarge:
-                return "The attachment exceeds the 512 KiB upload limit."
+                return "The attachment exceeds the 8 MB upload limit."
             case .unreadable(let why):
                 return why
             }

@@ -6,7 +6,8 @@ Never allow the upstream path-bearing or staged-upload variants for remote clien
 import base64
 import binascii
 
-MAX_ATTACHMENT_BYTES = 512 * 1024
+MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024
+_MAX_ATTACHMENT_LABEL = f'{MAX_ATTACHMENT_BYTES // (1024 * 1024)} MiB'
 ATTACHMENT_METHODS = frozenset({'file.attach', 'image.attach_bytes'})
 
 
@@ -35,10 +36,10 @@ def validate_attachment_request(method: str, params: object) -> None:
             raise AttachmentError('Invalid attachment data URL')
         data = data[len(prefix):]
     if not data or len(data) > ((MAX_ATTACHMENT_BYTES + 2) // 3) * 4:
-        raise AttachmentError('Attachment is empty or exceeds 512 KiB')
+        raise AttachmentError(f'Attachment is empty or exceeds {_MAX_ATTACHMENT_LABEL}')
     try:
         decoded = base64.b64decode(data, validate=True)
     except (ValueError, binascii.Error):
         raise AttachmentError('Invalid attachment encoding') from None
     if not decoded or len(decoded) > MAX_ATTACHMENT_BYTES:
-        raise AttachmentError('Attachment is empty or exceeds 512 KiB')
+        raise AttachmentError(f'Attachment is empty or exceeds {_MAX_ATTACHMENT_LABEL}')

@@ -34,6 +34,33 @@ def test_rejects_unsafe_or_malformed_fields(changes):
         validate_attachment_request('file.attach', {**params, **changes})
 
 
+def test_attachment_ceiling_is_eight_mib():
+    assert MAX_ATTACHMENT_BYTES == 8 * 1024 * 1024
+
+
+@pytest.mark.parametrize('method,field,name_field', [
+    ('file.attach', 'data_url', 'name'),
+    ('image.attach_bytes', 'content_base64', 'filename'),
+])
+def test_exactly_eight_mib_is_accepted(method, field, name_field):
+    payload = b'x' * (8 * 1024 * 1024)
+    encoded = base64.b64encode(payload).decode()
+    params = {'session_id': 'abc', name_field: 'big.bin', field: encoded if method == 'image.attach_bytes' else 'data:application/octet-stream;base64,' + encoded}
+    validate_attachment_request(method, params)
+
+
+@pytest.mark.parametrize('method,field,name_field', [
+    ('file.attach', 'data_url', 'name'),
+    ('image.attach_bytes', 'content_base64', 'filename'),
+])
+def test_one_byte_over_eight_mib_is_rejected(method, field, name_field):
+    payload = b'x' * (8 * 1024 * 1024 + 1)
+    encoded = base64.b64encode(payload).decode()
+    params = {'session_id': 'abc', name_field: 'big.bin', field: encoded if method == 'image.attach_bytes' else 'data:application/octet-stream;base64,' + encoded}
+    with pytest.raises(AttachmentError, match='8 MiB'):
+        validate_attachment_request(method, params)
+
+
 def test_path_methods_are_not_supported():
     with pytest.raises(AttachmentError):
         validate_attachment_request('image.attach', {'session_id': 'abc', 'path': '/etc/passwd'})

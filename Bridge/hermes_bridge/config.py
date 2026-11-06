@@ -24,7 +24,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from .policy import is_valid_method_name
 
 DEFAULT_FRAME_CAP = 1024 * 1024
-MAX_FRAME_CAP = 8 * 1024 * 1024
+# An 8 MiB attachment arrives base64-encoded inside one JSON frame (~10.7 MiB), so the
+# ceiling has to clear that or uvicorn closes the socket before attachment validation runs.
+MAX_FRAME_CAP = 16 * 1024 * 1024
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 

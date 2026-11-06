@@ -445,15 +445,16 @@ public actor GatewayClient: GatewayClientProtocol {
 
     // MARK: Attachments
 
-    /// The bridge's decoded-byte ceiling; refused here as well so the user sees the limit instead of
-    /// a rejected frame.
-    private static let maxAttachmentBytes = 512 * 1024
+    /// The client's decoded-byte ceiling; refused here as well so the user sees the limit
+    /// instead of a rejected frame. In sync with `AttachmentBudget.maximumBytes` in the phone
+    /// app: 8 MiB decodes from ~10.7 MiB of base64, safely under the 16 MiB websocket frame.
+    private static let maxAttachmentBytes = 8 * 1024 * 1024
 
     public func attach(session: SessionID, name: String, data: Data,
                        isImage: Bool) async throws -> AttachmentReceipt {
         guard !data.isEmpty, data.count <= Self.maxAttachmentBytes else {
             throw GatewayError.rpc(RPCError(code: -32000,
-                                            message: "attachment must be 1 byte to 512 KiB"))
+                                            message: "attachment must be 1 byte to 8 MB"))
         }
         guard !name.isEmpty, name != ".", name != "..", name.utf8.count <= 255,
               name.rangeOfCharacter(from: CharacterSet(charactersIn: "/\\\0\n\r")) == nil else {

@@ -25,10 +25,16 @@ let package = Package(
         .target(name: "HermesVoiceCore",
                 path: "Apps/HermesMobile/Networking",
                 sources: ["VoiceTransport.swift", "VoiceService.swift"]),
+        // The attachment budget, name rules and downscaling ladder: Foundation only, for the
+        // same reason as the voice core — the decisions can be tested without a simulator.
+        .target(name: "HermesAttachmentCore",
+                path: "Apps/HermesMobile/Networking",
+                sources: ["AttachmentBudget.swift"]),
 
         .testTarget(name: "HermesKitTests", dependencies: ["HermesKit"], path: "Tests/HermesKitTests"),
         .testTarget(name: "HermesAppKitTests", dependencies: ["HermesAppKit"], path: "Tests/HermesAppKitTests"),
         .testTarget(name: "HermesRenderTests", dependencies: ["HermesRender"], path: "Tests/HermesRenderTests"),
         .testTarget(name: "HermesVoiceTests", dependencies: ["HermesVoiceCore"], path: "Tests/HermesVoiceTests"),
+        .testTarget(name: "HermesAttachmentTests", dependencies: ["HermesAttachmentCore"], path: "Tests/HermesAttachmentTests"),
     ]
 )
