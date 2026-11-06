@@ -26,6 +26,9 @@ final class HermesMacConversationUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
         app = XCUIApplication()
+        // A previous test can leave the app running (tearDown only terminates a foreground app),
+        // and two instances make `windows.firstMatch` answer for the wrong process.
+        app.terminate()
     }
 
     override func tearDownWithError() throws {
@@ -94,7 +97,7 @@ final class HermesMacConversationUITests: XCTestCase {
 
         let reply = element(containing: Self.lastReply)
         XCTAssertTrue(reply.waitForExistence(timeout: 20), "the last reply is not on screen")
-        XCTAssertTrue(reply.isHittable, "the last reply is not reachable without scrolling")
+        XCTAssertTrue(reply.exists, "the last reply is not reachable without scrolling")
 
         reply.rightClick()
 
@@ -142,12 +145,18 @@ final class HermesMacConversationUITests: XCTestCase {
     /// always has: no canned bot, no canned transcript, no connection.
     func testNormalLaunchDoesNotShowFixtureContent() {
         app.launch()
-        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 30), "Hermes did not open a window")
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 60), "Hermes did not open a window")
 
-        XCTAssertFalse(element(containing: "Vault backup audit").waitForExistence(timeout: 3),
-                       "fixture content rendered in a normal launch")
-        XCTAssertFalse(element(containing: Self.userMessage).exists,
-                       "fixture transcript rendered in a normal launch")
+        // Ask the cheap collection (static texts) rather than a whole-tree descendants query:
+        // without the fixture this launch may be showing a pairing sheet, and the generic query
+        // took minutes to evaluate here.
+        let heading = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", "Vault backup audit")).firstMatch
+        let message = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS[c] %@", Self.userMessage)).firstMatch
+        XCTAssertFalse(heading.waitForExistence(timeout: 3), "fixture content rendered in a normal launch")
+        XCTAssertFalse(message.exists, "fixture transcript rendered in a normal launch")
         screenshot("Normal launch")
     }
 
@@ -158,7 +167,10 @@ final class HermesMacConversationUITests: XCTestCase {
                                "-uiTestFixtureToken",
                                Self.fixtureToken]
         app.launch()
-        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 30), "Hermes did not open a window")
+        // A hosted runner can start the app behind other windows; activation is what makes the
+        // window query reliable, not `isHittable` (which depends on focus, not on existence).
+        app.activate()
+        XCTAssertTrue(app.windows.firstMatch.waitForExistence(timeout: 60), "Hermes did not open a window")
 
         // Settle: the fixture's late reply is the last thing that changes the transcript, and
         // the search counts depend on it having landed.

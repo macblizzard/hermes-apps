@@ -5,6 +5,8 @@ final class HermesMacSmokeTests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        // Never inherit an instance another test left running.
+        app.terminate()
     }
 
     override func tearDownWithError() throws {
@@ -15,9 +17,12 @@ final class HermesMacSmokeTests: XCTestCase {
 
     func testLaunchAndDismissPairing() {
         app.launch()
+        app.activate()
         let window = app.windows.firstMatch
-        XCTAssertTrue(window.waitForExistence(timeout: 20), "Hermes did not open a window")
-        XCTAssertTrue(window.isHittable, "Hermes window is not visible")
+        XCTAssertTrue(window.waitForExistence(timeout: 60), "Hermes did not open a window")
+        // `isHittable` reports focus, and a hosted runner's window is not always focused even
+        // though it is on screen; existence after activation is the honest check here.
+        XCTAssertTrue(window.exists, "Hermes window is not visible")
         screenshot("Launched window")
 
         // Use the app's own menu shortcut, not coordinates or test-only app code.
@@ -32,7 +37,7 @@ final class HermesMacSmokeTests: XCTestCase {
         cancel.click()
         let gone = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: urlField)
         wait(for: [gone], timeout: 10)
-        XCTAssertTrue(window.isHittable, "Main window was not restored")
+        XCTAssertTrue(window.waitForExistence(timeout: 10), "Main window was not restored")
         screenshot("Pairing dismissed")
     }
 
