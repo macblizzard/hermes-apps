@@ -2,9 +2,9 @@ import HermesAppKit
 import OpenBotUI
 import SwiftUI
 
-/// macOS workspace. Rail 72, session list 280 (drag 64…400, collapses under 110 to the
-/// 88 pt strip), conversation on a 640 pt measure, context panel 236 — the geometry in
-/// `Geometry`, which mirrors OpenBot's `layout-constants.ts`.
+/// macOS window: **bot panel on the left, chat on the right** — the phone's two-pane shape, with
+/// no session list and no inspector column. The bot panel defaults to 280 pt and drags between
+/// 200 and 400; the conversation takes the rest on a 640 pt measure (`Geometry`).
 ///
 /// Launch is offline by construction: `WorkspaceStore` restores the pairing it was given
 /// last time but dials nothing, and the only calls into `connect()` are the Connect button,
@@ -20,7 +20,7 @@ struct HermesMacApp: App {
     var body: some Scene {
         WindowGroup("Hermes") {
             WorkspaceRoot(store: store)
-                .frame(minWidth: Geometry.serverRailMacOS + Geometry.sidebarMin + Geometry.conversationMin,
+                .frame(minWidth: WorkspaceStore.sidebarFloor + Geometry.conversationMin,
                        minHeight: 560)
                 .preferredColorScheme(.dark)
                 // No-op unless the fixture launch argument was given: the real window connects
@@ -28,10 +28,17 @@ struct HermesMacApp: App {
                 .task { await store.attachFixtureHostIfNeeded() }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1320, height: 840)
+        .defaultSize(width: 1240, height: 840)
         .commands {
             WorkspaceCommands(store: store)
         }
+
+        // A real Settings scene: ⌘, opens it, and it stays open beside the workspace instead of
+        // stacking a third modal sheet over the window the user is trying to read.
+        Settings {
+            MacSettingsView(store: store)
+        }
+
         Window("Paired Devices", id: "paired-devices") {
             MacDevicesView(store: store)
         }
@@ -48,13 +55,8 @@ struct WorkspaceCommands: Commands {
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
+        // No "New Session": a bot has exactly one conversation, so there is nothing to create.
         CommandGroup(replacing: .newItem) {
-            Button("New Session") {
-                store.newSession()
-            }
-            .keyboardShortcut("n", modifiers: .command)
-            .disabled(!store.model.connection.isLive)
-
             Button("Pair Host…") {
                 store.isPairSheetPresented = true
             }
@@ -65,7 +67,7 @@ struct WorkspaceCommands: Commands {
             }
         }
 
-        CommandMenu("Session") {
+        CommandMenu("Conversation") {
             Button("Send Message") {
                 store.send()
             }
@@ -80,11 +82,25 @@ struct WorkspaceCommands: Commands {
 
             Divider()
 
-            Button("Reload Sessions") {
-                store.reloadSessions()
+            Button("Bot Settings…") {
+                guard let bot = store.selectedBot else { return }
+                store.openBotSettings(bot)
             }
-            .keyboardShortcut("r", modifiers: .command)
-            .disabled(!store.model.connection.isLive)
+            .disabled(store.selectedBot == nil)
+
+            Menu("Switch Bot") {
+                ForEach(store.model.orderedBots) { bot in
+                    Button(bot.id == store.model.selectedBotID
+                           ? "✓ \(bot.displayName)"
+                           : bot.displayName) {
+                        store.selectBot(bot.id)
+                    }
+                    .disabled(!store.model.connection.isLive)
+                }
+            }
+            .disabled(store.model.orderedBots.isEmpty)
+
+            Divider()
 
             Button(store.model.connection.isLive ? "Disconnect" : "Connect") {
                 Task {
@@ -100,16 +116,11 @@ struct WorkspaceCommands: Commands {
             Divider()
 
             Button("Command Palette…") {
-                store.openPalette()
+                store.togglePalette()
             }
             .keyboardShortcut("k", modifiers: .command)
         }
 
-        CommandGroup(after: .toolbar) {
-            Button(store.showsContextPanel ? "Hide Context Panel" : "Show Context Panel") {
-                store.toggleContextPanel()
-            }
-            .keyboardShortcut("\\", modifiers: .command)
-        }
+        // Settings… and Quit come from the standard groups: the `Settings` scene above owns ⌘,.
     }
 }

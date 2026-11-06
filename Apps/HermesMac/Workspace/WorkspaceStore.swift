@@ -6,12 +6,18 @@ import OpenBotUI
 import SwiftUI
 
 /// Everything the macOS shell owns that `AppModel` does not: the pairing, the palette, the
-/// pane geometry and the per-session drafts.
+/// pane geometry and the per-bot drafts.
 ///
 /// `AppModel` stays the single source of truth for what is on the wire. This type is the
 /// window around it — and it is deliberately the only place that knows both a
 /// `PairingAddress` and a `GatewayClient`, so a preview can hold an `AppModel` with no
 /// socket anywhere near it.
+///
+/// **One panel, one conversation.** The Mac matches the phone: the left panel lists bots and
+/// nothing else, and picking a bot opens *that bot's single conversation* through
+/// `AppModel.endlessSession(for:)` — the stored id under `hermes.endlessSession.<botID>`, resumed
+/// on every switch. There is no session list, no session search and no session selection here;
+/// the shell never asks the host for a conversation the model did not already remember.
 @MainActor
 final class WorkspaceStore: ObservableObject {
 
@@ -23,32 +29,40 @@ final class WorkspaceStore: ObservableObject {
 
     @Published var isPairSheetPresented = false
     @Published var isPalettePresented = false
-    @Published var searchText = ""
-    @Published var showsContextPanel = true
-    /// The bot whose settings sheet is open; `nil` closes it. Both the sidebar's context menu and
-    /// the conversation's menu set this, so there is one sheet and one owner.
+    /// The bot whose settings sheet is open; `nil` closes it. The bot list's context menu, the
+    /// conversation's menu and the Settings window's Bots tab all set this, so there is one
+    /// sheet and one owner.
     @Published var botSettingsBot: Bot? = nil
     @Published private(set) var botIcons: [String: BotIcon] = [:]
     @Published private(set) var botIconsError: String?
     private var iconGeneration = 0
     /// The open bot's own profile default, for the header chip.
     ///
-    /// `AppModel.modelLabel` is read once per connect and per endless-session open; the Mac opens
-    /// plain sessions, so after a bot switch it would still name the previous bot. This asks the
+    /// `AppModel.modelLabel` is read once per connect and per endless-session open; this asks the
     /// same profile-scoped catalogue call and is refreshed whenever the open bot changes.
     @Published private(set) var openBotModelLabel: String?
     @Published private(set) var sidebarWidth: CGFloat = Geometry.sidebarDefault
 
-    /// Set the first time the user asks to connect, so the empty sidebar can tell
+    /// Set the first time the user asks to connect, so the empty panel can tell
     /// "not paired" apart from "paired, but nothing loaded yet".
     @Published private(set) var connectAttempted = false
 
     private let pairingStore = PairingStore()
     private var latencyTask: Task<Void, Never>?
-    private var drafts: [SessionID: String] = [:]
+    /// Unsent composer text, parked under the bot it was typed for. A draft has no profile on
+    /// the host yet, so it belongs to the bot, not to a session id.
+    private var drafts: [String: String] = [:]
 
     private static let widthKey = "hermes.workspace.sidebarWidth"
-    private static let contextKey = "hermes.workspace.showsContext"
+
+    /// The narrowest the bot panel may be dragged: below this a row's name and description
+    /// collide with the unread dot.
+    static let sidebarFloor: CGFloat = 200
+
+    /// Retained only because the frozen UI-test fixture assigns it
+    /// (`Apps/HermesMac/Testing/PreviewFixture.swift`, which this branch must not edit). The
+    /// right-hand context panel is gone, so nothing in the app reads this and nothing persists it.
+    @Published var showsContextPanel = false
 
     // MARK: Init
 
@@ -74,10 +88,6 @@ final class WorkspaceStore: ObservableObject {
 
     var isPaired: Bool { pairing != nil }
 
-    /// Under 110 pt the sidebar becomes the compact avatar strip
-    /// (`Geometry.sidebarCollapseBelow`).
-    var sidebarIsCompact: Bool { sidebarWidth < Geometry.sidebarCollapseBelow }
-
     var canSend: Bool {
         model.selectedSessionID != nil
             && !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -87,12 +97,12 @@ final class WorkspaceStore: ObservableObject {
 
     var connectionLabel: String { model.connection.label }
 
-    /// The bot whose sessions are on screen. Nil while the list is still empty, which is
-    /// what lets the sidebar say "no bots" rather than borrow a name.
+    /// The bot whose conversation is on screen. Nil while the list is still empty, which is
+    /// what lets the panel say "no bots" rather than borrow a name.
     var selectedBot: Bot? { model.selectedBot }
 
-    /// The sidebar header. A bot name when one is selected; the host's own name before
-    /// profiles arrive, never a hardcoded product name.
+    /// The chat header's name: the bot, because a bot *is* the conversation. Before profiles
+    /// arrive it falls back to the host's own name, never a hardcoded product name.
     var botTitle: String {
         selectedBot?.displayName ?? model.hostName
     }
@@ -122,38 +132,56 @@ final class WorkspaceStore: ObservableObject {
 
     /// Re-read the host's bot directory. `AppModel.start()` already does this on connect;
     /// this exists for the explicit "check again" affordance, which must not reconnect.
-    ///
-    /// The session list is re-read too: if the selected bot disappeared from the directory,
-    /// `loadBots` moves the selection, and the rows on screen would otherwise still belong
-    /// to the bot that is no longer selected.
     func loadBots() async {
         await model.loadBots()
-        await model.loadSessions()
         await loadBotIcons()
     }
 
-    /// Switch the workspace to another bot: sessions and conversation follow, and the
-    /// first session of the new bot opens so the pane never sits on the old transcript.
+    /// Switch the workspace to another bot: its one conversation is resumed, and the composer
+    /// shows the draft that was typed for it.
     ///
-    /// The composer is per-session state the model does not clear on a bot switch, so the
-    /// draft is parked under the session it was typed in and the field is emptied. Without
-    /// that, text meant for one bot would sit in the composer addressed to the next one.
+    /// The conversation is *resumed*, not created: `endlessSession(for:)` reads the stored id and
+    /// only starts a new session when the host has forgotten the old one (4001/4007). Switching
+    /// back and forth therefore never piles up empty sessions on the host.
     func selectBot(_ id: String) {
         guard id != model.selectedBotID else { return }
-        if let current = model.selectedSessionID {
-            drafts[current] = model.draft
-        }
+        parkDraft()
         model.draft = ""
         Task { [weak self] in
             guard let self else { return }
-            await self.model.selectBot(id)
-            // The chip names the bot on screen: re-read that bot's own default.
-            await self.refreshOpenBotModelLabel()
-            if let first = self.model.sessions.first {
-                await self.model.select(first.id)
-                self.model.draft = self.drafts[first.id] ?? ""
-            }
+            await self.openConversation(for: id)
+            self.model.draft = self.drafts[id] ?? ""
         }
+    }
+
+    /// Open (or resume) the selected bot's single conversation.
+    ///
+    /// The one door the empty chat offers, and what `connect()` calls when the wire comes up.
+    func startConversation() {
+        guard let id = model.selectedBotID else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.openConversation(for: id)
+            self.model.draft = self.drafts[id] ?? ""
+        }
+    }
+
+    /// Resume-or-create, then refresh the header's model chip.
+    private func openConversation(for botID: String) async {
+        _ = await model.endlessSession(for: botID)
+        await refreshOpenBotModelLabel()
+    }
+
+    /// After the socket opens: nothing is on screen yet, so open the selected bot's conversation.
+    /// A reconnect that already has a conversation keeps it (`selectedSessionID` is non-nil).
+    private func openConversationIfNeeded() async {
+        guard model.selectedSessionID == nil, let bot = model.selectedBotID else { return }
+        await openConversation(for: bot)
+        model.draft = drafts[bot] ?? ""
+    }
+
+    private func parkDraft() {
+        if let id = model.selectedBotID { drafts[id] = model.draft }
     }
 
     // MARK: Lifecycle
@@ -170,7 +198,7 @@ final class WorkspaceStore: ObservableObject {
         if model.connection.isLive {
             startLatencyLoop()
             await loadBotIcons()
-            await openFirstSessionIfNeeded()
+            await openConversationIfNeeded()
         }
     }
 
@@ -180,6 +208,7 @@ final class WorkspaceStore: ObservableObject {
         if model.connection.isLive {
             startLatencyLoop()
             await loadBotIcons()
+            await openConversationIfNeeded()
         }
     }
 
@@ -254,41 +283,17 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    // MARK: Sessions
+    // MARK: Previews and UI fixture
 
-    /// Open a session, keeping each session's unsent draft with it.
-    func select(_ id: SessionID) {
-        guard id != model.selectedSessionID else { return }
-        if let current = model.selectedSessionID {
-            drafts[current] = model.draft
-        }
-        let restored = drafts[id] ?? ""
-        Task { [weak self] in
-            guard let self else { return }
-            await self.model.select(id)
-            self.model.draft = restored
-        }
-    }
-
+    /// Open the first session the model already listed, if nothing is open.
+    ///
+    /// This is the *offline* path only: `PreviewSupport.attachPreviewHost()` and the frozen
+    /// UI-test fixture call it to put a canned transcript on screen without a live host (the
+    /// fixture's `listSessions` answers one row). The app itself never calls it — bot selection
+    /// goes through `endlessSession(for:)`.
     func openFirstSessionIfNeeded() async {
         guard model.selectedSessionID == nil, let first = model.sessions.first else { return }
         await model.select(first.id)
-    }
-
-    func reloadSessions() {
-        Task { [weak self] in
-            await self?.model.loadSessions()
-        }
-    }
-
-    func newSession() {
-        Task { [weak self] in
-            guard let self else { return }
-            await self.model.newSession()
-            if let id = self.model.selectedSessionID {
-                self.drafts[id] = ""
-            }
-        }
     }
 
     // MARK: Turn
@@ -368,32 +373,23 @@ final class WorkspaceStore: ObservableObject {
 
     // MARK: Geometry
 
-    /// Live drag value, clamped to what the layout can actually draw (the collapse rule
-    /// needs values under 110 to be reachable, so the floor is lower than `sidebarMin`).
+    /// Live drag value, clamped to what the panel can actually draw.
     func setSidebarWidth(_ width: CGFloat) {
-        sidebarWidth = min(Geometry.sidebarMax, max(64, width))
+        sidebarWidth = min(Geometry.sidebarMax, max(WorkspaceStore.sidebarFloor, width))
     }
 
-    /// Snap on mouse-up: under 110 collapses to the 88 pt strip, otherwise the 128…400
-    /// range applies. Persisted so the window reopens where it was left.
+    /// Snap on mouse-up and persist, so the window reopens where it was left.
     func endSidebarDrag() {
-        if sidebarWidth < Geometry.sidebarCollapseBelow {
-            sidebarWidth = Geometry.sidebarCompact
-        } else {
-            sidebarWidth = min(Geometry.sidebarMax, max(Geometry.sidebarMin, sidebarWidth))
-        }
+        sidebarWidth = min(Geometry.sidebarMax, max(WorkspaceStore.sidebarFloor, sidebarWidth))
         UserDefaults.standard.set(Double(sidebarWidth), forKey: WorkspaceStore.widthKey)
-    }
-
-    func toggleContextPanel() {
-        showsContextPanel.toggle()
-        UserDefaults.standard.set(showsContextPanel, forKey: WorkspaceStore.contextKey)
     }
 
     // MARK: Palette
 
     func openPalette() { isPalettePresented = true }
     func closePalette() { isPalettePresented = false }
+    /// ⌘K, ⌘K again: the palette is an overlay now, so the same key both raises and drops it.
+    func togglePalette() { isPalettePresented.toggle() }
 
     /// The live catalogue. Disabled entries are shown but cannot run: a palette that hides
     /// half its verbs is harder to learn than one that explains why a verb is unavailable.
@@ -401,34 +397,27 @@ final class WorkspaceStore: ObservableObject {
         var items: [WorkspaceCommand] = []
 
         items.append(WorkspaceCommand(
-            id: "session.new",
-            title: "New session",
-            subtitle: "Ask the host for a fresh conversation",
-            systemImage: "plus.bubble",
-            shortcut: "⌘N",
-            group: .session,
-            isEnabled: model.connection.isLive,
-            run: { [weak self] in self?.newSession() }))
-
-        items.append(WorkspaceCommand(
-            id: "session.reload",
-            title: "Reload sessions",
-            subtitle: "Re-list conversations on the host",
-            systemImage: "arrow.clockwise",
-            shortcut: nil,
-            group: .session,
-            isEnabled: model.connection.isLive,
-            run: { [weak self] in self?.reloadSessions() }))
-
-        items.append(WorkspaceCommand(
             id: "turn.interrupt",
             title: "Interrupt the turn",
-            subtitle: "Stop the running agent turn on this session",
+            subtitle: "Stop the running agent turn in this conversation",
             systemImage: "stop.fill",
             shortcut: "⌘.",
-            group: .session,
+            group: .chat,
             isEnabled: canInterrupt,
             run: { [weak self] in self?.interrupt() }))
+
+        items.append(WorkspaceCommand(
+            id: "chat.botSettings",
+            title: "Bot settings…",
+            subtitle: botSettingsSubtitle,
+            systemImage: "gearshape",
+            shortcut: nil,
+            group: .chat,
+            isEnabled: selectedBot != nil,
+            run: { [weak self] in
+                guard let self, let bot = self.selectedBot else { return }
+                self.openBotSettings(bot)
+            }))
 
         items.append(WorkspaceCommand(
             id: "host.connect",
@@ -472,33 +461,9 @@ final class WorkspaceStore: ObservableObject {
             isEnabled: true,
             run: { [weak self] in self?.isPairSheetPresented = true }))
 
-        items.append(WorkspaceCommand(
-            id: "view.context",
-            title: showsContextPanel ? "Hide context panel" : "Show context panel",
-            subtitle: "The \(Int(Geometry.contextPanel)) pt column on the right",
-            systemImage: showsContextPanel ? "sidebar.right" : "sidebar.left",
-            shortcut: "⌘\\",
-            group: .view,
-            isEnabled: true,
-            run: { [weak self] in self?.toggleContextPanel() }))
-
-        items.append(WorkspaceCommand(
-            id: "view.sidebar",
-            title: sidebarIsCompact ? "Expand session list" : "Collapse session list",
-            subtitle: "Switch between the 280 pt list and the 88 pt strip",
-            systemImage: "sidebar.left",
-            shortcut: nil,
-            group: .view,
-            isEnabled: true,
-            run: { [weak self] in
-                guard let self else { return }
-                self.setSidebarWidth(self.sidebarIsCompact ? Geometry.sidebarDefault : Geometry.sidebarCompact)
-                self.endSidebarDrag()
-            }))
-
         // The bots are a catalogue of their own: one command per profile, disabled for the
         // one already on screen, so switching is reachable without leaving the keyboard.
-        // `orderedBots` is the same list the sidebar draws — pinned first, hidden ones absent.
+        // `orderedBots` is the same list the panel draws — pinned first, hidden ones absent.
         for bot in model.orderedBots {
             items.append(WorkspaceCommand(
                 id: "bot.\(bot.id)",
@@ -508,12 +473,17 @@ final class WorkspaceStore: ObservableObject {
                     : "Bot · \(bot.id)",
                 systemImage: "person.crop.circle",
                 shortcut: nil,
-                group: .bot,
+                group: .bots,
                 isEnabled: bot.id != model.selectedBotID && model.connection.isLive,
                 run: { [weak self] in self?.selectBot(bot.id) }))
         }
 
         return items
+    }
+
+    private var botSettingsSubtitle: String {
+        guard let bot = selectedBot else { return "No bot selected" }
+        return "Description and default model for \(bot.displayName)"
     }
 
     // MARK: Private
@@ -537,10 +507,8 @@ final class WorkspaceStore: ObservableObject {
     private func restorePreferences() {
         let saved = UserDefaults.standard.double(forKey: WorkspaceStore.widthKey)
         if saved > 0 {
-            sidebarWidth = min(Geometry.sidebarMax, max(Geometry.sidebarCompact, CGFloat(saved)))
-        }
-        if UserDefaults.standard.object(forKey: WorkspaceStore.contextKey) != nil {
-            showsContextPanel = UserDefaults.standard.bool(forKey: WorkspaceStore.contextKey)
+            sidebarWidth = min(Geometry.sidebarMax,
+                               max(WorkspaceStore.sidebarFloor, CGFloat(saved)))
         }
     }
 

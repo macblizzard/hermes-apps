@@ -7,10 +7,14 @@ import SwiftUI
 /// The catalogue comes from `WorkspaceStore.commands`, so a verb that cannot run right now
 /// (interrupt, with no turn in flight) is listed disabled with its reason instead of
 /// vanishing — the palette doubles as a map of what this window can do.
+///
+/// It is presented as an overlay by `WorkspaceRoot`, not as a sheet: Escape, the backdrop and a
+/// second ⌘K all close it (`store.closePalette()`), and it never blocks the chat once gone.
 struct CommandPaletteView: View {
     @ObservedObject var store: WorkspaceStore
 
     @State private var query = ""
+    @State private var selected = 0
     @FocusState private var focused: Bool
 
     private var results: [WorkspaceCommand] {
@@ -27,7 +31,19 @@ struct CommandPaletteView: View {
         }
         .frame(width: 560, height: 440)
         .background(Tokens.sheet)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .onAppear { focused = true }
+        // As an overlay the view can appear before the window re-focuses; one runloop later is
+        // when a text field actually takes first responder.
+        .task {
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            focused = true
+        }
+        .onChange(of: query) { _ in selected = 0 }
+        .onChange(of: results.count) { count in
+            if count == 0 { selected = 0 } else { selected = min(selected, count - 1) }
+        }
+        .onExitCommand { store.closePalette() }
         .preferredColorScheme(.dark)
     }
 
@@ -47,7 +63,21 @@ struct CommandPaletteView: View {
                 .foregroundStyle(Tokens.textPrimary)
                 .tint(Tokens.accent)
                 .focused($focused)
-                .onSubmit { runFirst() }
+                .onSubmit { runChosen() }
+                // Arrow keys move the highlight instead of the caret: this field is a list
+                // filter, and one line of text has nowhere to scroll to.
+                .onKeyPress(.upArrow) {
+                    move(-1)
+                    return .handled
+                }
+                .onKeyPress(.downArrow) {
+                    move(1)
+                    return .handled
+                }
+                .onKeyPress(.escape) {
+                    store.closePalette()
+                    return .handled
+                }
                 .accessibilityLabel("Search commands")
 
             Text("esc")
@@ -78,8 +108,8 @@ struct CommandPaletteView: View {
         } else {
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 1) {
-                    ForEach(results) { command in
-                        row(command)
+                    ForEach(Array(results.enumerated()), id: \.offset) { pair in
+                        row(pair.element, at: pair.offset)
                     }
                 }
                 .padding(6)
@@ -87,7 +117,7 @@ struct CommandPaletteView: View {
         }
     }
 
-    private func row(_ command: WorkspaceCommand) -> some View {
+    private func row(_ command: WorkspaceCommand, at index: Int) -> some View {
         Button {
             run(command)
         } label: {
@@ -130,6 +160,10 @@ struct CommandPaletteView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: Tokens.radiusControl, style: .continuous)
+                    .fill(index == selected ? Tokens.controlActive : .clear)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -148,7 +182,7 @@ struct CommandPaletteView: View {
 
             Spacer(minLength: 0)
 
-            Text("⏎ run · ⇧⌘K closes")
+            Text("↑↓ choose · ⏎ run · esc closes")
                 .font(TypeScale.font(TypeScale.caption))
                 .foregroundStyle(Tokens.textDim)
         }
@@ -158,7 +192,18 @@ struct CommandPaletteView: View {
 
     // MARK: Actions
 
-    private func runFirst() {
+    private func move(_ delta: Int) {
+        guard !results.isEmpty else { return }
+        let next = selected + delta
+        selected = min(max(0, next), results.count - 1)
+    }
+
+    /// Return runs the highlighted row; the first runnable one when nothing is highlighted.
+    private func runChosen() {
+        if results.indices.contains(selected), results[selected].isEnabled {
+            run(results[selected])
+            return
+        }
         guard let first = results.first(where: { $0.isEnabled }) else { return }
         run(first)
     }

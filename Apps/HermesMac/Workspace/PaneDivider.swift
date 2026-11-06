@@ -1,11 +1,11 @@
 import OpenBotUI
 import SwiftUI
 
-/// The 7 pt grab strip between the session list and the conversation.
+/// The 7 pt grab strip between the bot panel and the conversation.
 ///
-/// OpenBot's sidebar is draggable from 128 to 400 pt and collapses under 110; this gesture
-/// is the only way to reach both ends, so it does not clamp at 128 — `WorkspaceStore`
-/// decides what a release under 110 means (the 88 pt strip).
+/// The panel drags between `WorkspaceStore.sidebarFloor` (200 pt) and `Geometry.sidebarMax`
+/// (400 pt): below 200 a bot row's name and description collide with its unread dot, and there
+/// is no collapsed avatar strip any more — the list *is* the panel.
 struct PaneDivider: View {
     @Binding var width: CGFloat
     let range: ClosedRange<CGFloat>
@@ -41,7 +41,7 @@ struct PaneDivider: View {
                     onCommit()
                 }
         )
-        .accessibilityLabel("Resize the session list")
+        .accessibilityLabel("Resize the bot panel")
     }
 }
 
@@ -54,7 +54,7 @@ private struct PaneDividerPreview: View {
         HStack(spacing: 0) {
             Color.clear.frame(width: width)
             PaneDivider(width: $width,
-                        range: 64...Geometry.sidebarMax,
+                        range: WorkspaceStore.sidebarFloor...Geometry.sidebarMax,
                         onCommit: {})
             Color.clear.frame(maxWidth: .infinity)
         }

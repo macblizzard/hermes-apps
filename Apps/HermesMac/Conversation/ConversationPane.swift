@@ -6,6 +6,10 @@ import SwiftUI
 /// The conversation column: header, optional wire banner, the transcript, the blocking
 /// requests, the composer.
 ///
+/// One conversation, forever: this pane has no picker and no "new" button. The transcript on
+/// screen is whatever `AppModel.selectedSessionID` holds — the bot's stored endless conversation,
+/// resumed by `WorkspaceStore` — and it stays put across reconnects.
+///
 /// Vertical order is the priority order. A banner sits directly under the header so a
 /// reconnecting wire is the first thing read; approvals sit directly above the composer
 /// because that is where the user's next action is.
@@ -37,7 +41,7 @@ struct ConversationPane: View {
                 }
             }
 
-            if openSession == nil {
+            if model.selectedSessionID == nil {
                 ConversationEmptyState(model: model, store: store)
             } else {
                 TranscriptScroll(model: model)
@@ -49,7 +53,7 @@ struct ConversationPane: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Tokens.canvas)
         // Mirrors the phone: the conversation that is on screen is the one whose replies count as
-        // read; leaving it (or switching bots) hands the unread dot back to the list.
+        // read; leaving it (or switching bots) hands the unread dot back to the panel.
         .onAppear {
             shownBotID = model.selectedBotID
             model.setVisibleBot(model.selectedBotID)
@@ -75,14 +79,6 @@ struct ConversationPane: View {
         }
     }
 
-    /// The transcript is only drawn for a session that is in the *current* bot's list.
-    /// A stale id left over from another bot must not paint one bot's messages under
-    /// another bot's header, so "open" means "present in `sessions`", not just non-nil.
-    private var openSession: SessionSummary? {
-        guard let id = model.selectedSessionID else { return nil }
-        return model.sessions.first { $0.id == id }
-    }
-
     private var bannerKind: ConnectionBanner.Kind? {
         guard store.isPaired || store.connectAttempted else { return nil }
         // `.failed` has a real message of its own, which the inline notice below shows
@@ -92,7 +88,9 @@ struct ConversationPane: View {
     }
 }
 
-/// Nothing open yet: the two doors (pair, connect) plus the shortcuts worth learning.
+/// Nothing open yet: the three doors (pair, connect, open the bot's conversation) plus the
+/// shortcuts worth learning. No "new session": a bot has one conversation and this is where it
+/// opens.
 private struct ConversationEmptyState: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
@@ -101,11 +99,8 @@ private struct ConversationEmptyState: View {
         if !store.isPaired { return "No host paired" }
         if !model.connection.isLive { return "Not connected" }
         if model.bots.isEmpty { return "No bots found on this host" }
-        if model.sessionsLoading && model.sessions.isEmpty {
-            return "Loading \(store.botTitle)'s conversations…"
-        }
-        if model.sessions.isEmpty { return "\(store.botTitle) has no sessions yet" }
-        return "No conversation selected"
+        if model.selectedBotID == nil { return "Pick a bot" }
+        return "Start the conversation with \(store.botTitle)"
     }
 
     private var subtitle: String {
@@ -113,18 +108,15 @@ private struct ConversationEmptyState: View {
             return "Paste your host's wss:// URL and device token. Nothing leaves this Mac until you do."
         }
         if !model.connection.isLive {
-            return "Connect to \(store.pairing?.displayHost ?? model.hostName) to load its sessions."
+            return "Connect to \(store.pairing?.displayHost ?? model.hostName) to load its bots."
         }
         if model.bots.isEmpty {
             return "The gateway answered, but listed no profiles. Check that this host has a Hermes bot to talk to, then check again."
         }
-        if model.sessionsLoading && model.sessions.isEmpty {
-            return "The host is listing this bot's sessions."
+        if model.selectedBotID == nil {
+            return "Choose a bot in the panel on the left; its conversation opens beside it."
         }
-        if model.sessions.isEmpty {
-            return "Start one here, or switch bots in the rail."
-        }
-        return "Pick a session in the list, or start a new one."
+        return "Each bot has a single conversation that picks up where it left off. Opening it resumes that history — nothing is thrown away."
     }
 
     private var icon: String {
@@ -149,7 +141,7 @@ private struct ConversationEmptyState: View {
                 .font(TypeScale.font(Tokens.textSM))
                 .foregroundStyle(Tokens.textMuted)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 320)
+                .frame(maxWidth: 340)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !store.isPaired {
@@ -168,9 +160,12 @@ private struct ConversationEmptyState: View {
                 OpenBotButton("Check again", systemImage: "arrow.clockwise", kind: .secondary, size: .small) {
                     Task { await store.loadBots() }
                 }
-            } else {
-                OpenBotButton("New session", systemImage: "square.and.pencil", kind: .secondary, size: .small) {
-                    store.newSession()
+            } else if model.selectedBotID != nil {
+                OpenBotButton("Open conversation",
+                              systemImage: "bubble.left",
+                              kind: .secondary,
+                              size: .small) {
+                    store.startConversation()
                 }
             }
 

@@ -7,11 +7,9 @@ import Foundation
 /// open. Nothing here is a placeholder that lies about what the app can do.
 struct WorkspaceCommand: Identifiable {
     enum Group: String, CaseIterable {
-        case session = "Session"
-        case go = "Go"
+        case chat = "Chat"
         case host = "Host"
-        case view = "View"
-        case bot = "Bots"
+        case bots = "Bots"
     }
 
     let id: String

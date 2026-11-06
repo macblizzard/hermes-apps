@@ -4,26 +4,35 @@ import HermesKit
 import OpenBotUI
 import SwiftUI
 
-/// The strip above the transcript: which conversation, whether a turn is live, and the two
-/// controls that shape the window (context panel, more actions).
+/// The strip above the transcript: which bot, whether a turn is live, how full the context is,
+/// and the menu of things that act on this conversation.
+///
+/// It names the **bot**, not a session: this app has one conversation per bot, so a title like
+/// "Vault backup + docs audit" would describe a row the user never picked. The transcript beneath
+/// is that bot's stored conversation, resumed wherever it was left.
 struct ConversationHeader: View {
     @ObservedObject var model: AppModel
     @ObservedObject var store: WorkspaceStore
 
+    /// ⌘, — the real Settings scene, opened from the chat's own menu.
+    @Environment(\.openSettings) private var openSettings
+
     private var title: String {
-        model.selectedSession?.title ?? "New conversation"
+        store.selectedBot?.displayName ?? model.hostName
     }
 
     private var subtitle: String {
-        guard let session = model.selectedSession else {
-            return store.isPaired ? "not connected" : "no host paired"
+        if !store.isPaired { return "no host paired" }
+        if !model.connection.isLive { return "not connected" }
+        guard model.selectedSessionID != nil else {
+            return model.bots.isEmpty ? "no bots on this host" : "no conversation open"
         }
-        var parts: [String] = [store.selectedBot?.displayName ?? model.hostName]
-        if let updated = session.updatedAt {
-            parts.append("updated \(RelativeTime.short(updated))")
-        }
+        var parts: [String] = [title]
         if !model.transcript.isEmpty {
             parts.append(model.transcript.count == 1 ? "1 entry" : "\(model.transcript.count) entries")
+        }
+        if let updated = model.selectedSession?.updatedAt {
+            parts.append("updated \(RelativeTime.short(updated))")
         }
         return parts.joined(separator: " · ")
     }
@@ -43,6 +52,16 @@ struct ConversationHeader: View {
         let short = words.prefix(2).joined(separator: " ")
         guard !short.isEmpty else { return nil }
         return short.count <= 22 ? short : String(short.prefix(21)) + "…"
+    }
+
+    /// How full the conversation is, as `used / window`. This is the one fact the removed
+    /// inspector column used to carry, and it is the fact that explains a compaction.
+    private var contextChipLabel: String? {
+        guard let used = model.contextUsed else { return nil }
+        if let max = model.contextMax, max > 0 {
+            return "\(Self.short(used)) / \(Self.short(max))"
+        }
+        return Self.short(used)
     }
 
     var body: some View {
@@ -65,6 +84,16 @@ struct ConversationHeader: View {
 
             Spacer(minLength: 8)
 
+            // A compaction is a real model turn on the host, so its outcome is a quiet note here
+            // rather than a banner: nothing failed, the transcript was rewritten.
+            if let notice = model.compactionNotice {
+                StatusChip(notice, tone: .neutral, size: .small)
+            }
+
+            if let context = contextChipLabel {
+                StatusChip(context, tone: .neutral, size: .small)
+            }
+
             // The open bot's own model, from the profile-scoped catalogue — never the gateway's
             // default, which is what a chip reading an unscoped call names.
             if let label = modelChipLabel {
@@ -82,13 +111,7 @@ struct ConversationHeader: View {
             OpenBotIconButton("magnifyingglass",
                               label: "Command palette (⌘K)",
                               size: .small) {
-                store.openPalette()
-            }
-
-            OpenBotIconButton("sidebar.right",
-                              label: store.showsContextPanel ? "Hide the context panel" : "Show the context panel",
-                              size: .small) {
-                store.toggleContextPanel()
+                store.togglePalette()
             }
 
             moreMenu
@@ -116,12 +139,8 @@ struct ConversationHeader: View {
                 Divider()
             }
             Button("Command palette…") { store.openPalette() }
-            Button("New session") { store.newSession() }
-                .disabled(!model.connection.isLive)
-                .keyboardShortcut("n", modifiers: [.command, .shift])
+            Button("Settings…") { openSettings() }
             Divider()
-            Button("Reload sessions") { store.reloadSessions() }
-                .disabled(!model.connection.isLive)
             Button("Pair host…") { store.isPairSheetPresented = true }
             Divider()
             if model.connection.isLive {
@@ -141,6 +160,20 @@ struct ConversationHeader: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("More actions")
+    }
+
+    /// `200 000` reads as a number; `200k` fits in a chip next to the model name.
+    private static func short(_ value: Int) -> String {
+        if value >= 1_000_000 {
+            let millions = Double(value) / 1_000_000
+            return millions == millions.rounded()
+                ? "\(Int(millions))M"
+                : String(format: "%.1fM", millions)
+        }
+        if value >= 1_000 {
+            return "\(Int((Double(value) / 1_000).rounded()))k"
+        }
+        return "\(value)"
     }
 }
 

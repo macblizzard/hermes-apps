@@ -16,6 +16,9 @@ struct SidebarBotList: View {
     @ObservedObject var store: WorkspaceStore
     /// View preference, not a stored one: hidden bots stay hidden across launches via the model.
     @Binding var showsHiddenBots: Bool
+    /// True when this block *is* the left panel rather than a strip above a session list: the
+    /// rows then take every point the window offers instead of stopping after about five.
+    var fillsAvailableHeight: Bool = false
 
     /// Hidden bots are excluded by the model's ordering, so this is the visible list.
     private var visibleBots: [Bot] { model.orderedBots }
@@ -80,8 +83,9 @@ struct SidebarBotList: View {
 
     // MARK: Rows
 
+    @ViewBuilder
     private var rows: some View {
-        ScrollView(.vertical, showsIndicators: false) {
+        let rows = ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 1) {
                 ForEach(visibleBots) { bot in
                     row(for: bot)
@@ -99,7 +103,12 @@ struct SidebarBotList: View {
                 }
             }
         }
-        .frame(height: listHeight)
+
+        if fillsAvailableHeight {
+            rows.frame(maxHeight: .infinity)
+        } else {
+            rows.frame(height: listHeight)
+        }
     }
 
     private func row(for bot: Bot) -> some View {
