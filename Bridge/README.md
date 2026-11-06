@@ -44,18 +44,19 @@ that is not loopback (the gateway token must never cross a network).
 | POST | `/v1/pair/start` | host-only: loopback **and** no proxy headers |
 | POST | `/v1/pair/claim` | 8-digit single-use code, rate limited per source |
 | POST | `/v1/token` | refresh token → 15 min access token + 30 s WS ticket |
-| GET | `/v1/devices` | ids/names/dates only, never a token or hash |
-| DELETE | `/v1/devices/{id}` | revokes and kills outstanding tickets |
+| GET | `/v1/devices` | authenticated list; ids/names/dates only, never a token or hash |
+| DELETE | `/v1/devices/{id}` | authenticated revoke; kills outstanding tickets |
 | DELETE | `/v1/devices/{id}/revoked` | permanently removes a revoked device record |
 | WS | `/v1/ws?ticket=…` | the JSON-RPC relay |
 
-Permanent cleanup requires `Authorization: Bearer <ws_ticket>` from a different,
-active paired device. Mint a fresh single-use ticket with `POST /v1/token` for
-each request; the returned `access_token` is not an authentication credential.
-The endpoint returns 200 on deletion, 409 for an active device, 404 for an
-unknown device, and 401 for a missing, invalid, expired, replayed, or revoked
-ticket. Any active paired device can perform cleanup. The existing revoke route
-is unchanged; cleanup does not provide authentication for that route.
+Device listing, revocation and permanent cleanup require an `Authorization` bearer header
+containing a fresh WebSocket ticket from an active paired device. Mint one with
+`POST /v1/token` for **each** request; the returned `access_token` is not an
+authentication credential. Missing, invalid, expired, replayed, or revoked tickets
+return 401. Revocation may target the authenticating device itself; the request is
+authorized first, then its refresh token, tickets, and live sockets are invalidated.
+Permanent cleanup additionally returns 409 for an active device and 404 for an
+unknown device.
 
 ## WebSocket relay
 
@@ -109,8 +110,5 @@ close codes and server→client request routing rather than a mock.
 
 ## Known gaps
 
-- `/v1/devices` and `DELETE /v1/devices/{id}` have no per-device authentication;
-  they rely on the tailnet ACL. The access token returned by `/v1/token` is
-  reserved for that but is not verified yet.
 - One device may hold several concurrent sockets. There is no per-device
   connection cap yet.

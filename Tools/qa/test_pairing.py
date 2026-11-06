@@ -14,6 +14,10 @@ import sqlite3
 
 import pytest
 
+
+def bearer(bridge, pairing) -> dict[str, str]:
+    return {"Authorization": "Bearer " + bridge.mint_ticket(pairing).ticket}
+
 from qa_support import ROOT
 from harness import BridgeUnderTest
 
@@ -66,7 +70,9 @@ def test_pairing_round_trip_yields_a_device_and_a_ticket(bridge_factory):
         assert len(token.json()["ws_ticket"]) >= 32
         assert token.json()["expires_in"] == 15 * 60
 
-        devices = client.get("/v1/devices").json()
+        devices = client.get(
+            "/v1/devices", headers={"Authorization": "Bearer " + token.json()["ws_ticket"]}
+        ).json()
         assert [d["device_id"] for d in devices] == [device["device_id"]]
         assert devices[0]["revoked"] is False
 
@@ -186,14 +192,16 @@ def test_a_revoked_device_cannot_mint_tokens(bridge_factory):
     bridge = bridge_factory()
     pairing = bridge.pair()
     with bridge.http as client:
-        assert client.delete(f"/v1/devices/{pairing.device_id}").status_code == 200
+        assert client.delete(f"/v1/devices/{pairing.device_id}",
+                             headers=bearer(bridge, pairing)).status_code == 200
     assert bridge.token(pairing).status_code == 401
 
 
 def test_revoking_an_unknown_device_is_a_404(bridge_factory):
     bridge = bridge_factory()
+    pairing = bridge.pair()
     with bridge.http as client:
-        assert client.delete("/v1/devices/nope").status_code == 404
+        assert client.delete("/v1/devices/nope", headers=bearer(bridge, pairing)).status_code == 404
 
 
 def test_the_refresh_token_is_stored_hashed_and_never_on_disk(bridge_factory):
@@ -203,7 +211,7 @@ def test_the_refresh_token_is_stored_hashed_and_never_on_disk(bridge_factory):
 
     # The device record the API exposes must not contain the token either.
     with bridge.http as client:
-        listing = client.get("/v1/devices").text
+        listing = client.get("/v1/devices", headers=bearer(bridge, pairing)).text
     assert pairing.refresh_token not in listing
     assert pairing.public_key not in listing
 
@@ -229,10 +237,7 @@ def test_the_access_token_is_not_a_bearer_for_the_http_api(bridge_factory):
         response = client.get(
             "/v1/devices", headers={"Authorization": f"Bearer {token['access_token']}"}
         )
-    # Today every caller of /v1/devices is the host (loopback) — which is the
-    # point: the tailnet is the wall, and there is no device-scoped REST surface
-    # for an access token to open. Recorded in docs/SECURITY.md as a design note.
-    assert response.status_code == 200
+    assert response.status_code == 401
     assert "refresh_token_hash" not in response.text
 
 
@@ -265,7 +270,7 @@ def test_the_gateway_token_is_not_exposed_by_any_http_surface(bridge_factory):
     with bridge.http as client:
         bodies = [
             client.get("/v1/health").text,
-            client.get("/v1/devices").text,
+            client.get("/v1/devices", headers=bearer(bridge, pairing)).text,
             client.post("/v1/pair/start").text,
             client.post("/v1/token", json={"device_id": pairing.device_id,
                                            "refresh_token": pairing.refresh_token}).text,

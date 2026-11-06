@@ -28,6 +28,12 @@ def client(app, host: str = "127.0.0.1") -> TestClient:
     return TestClient(app, client=(host, 50000))
 
 
+def auth_headers(c: TestClient, device_id: str, refresh_token: str) -> dict[str, str]:
+    token = c.post("/v1/token", json={"device_id": device_id, "refresh_token": refresh_token})
+    assert token.status_code == 200, token.text
+    return {"Authorization": "Bearer " + token.json()["ws_ticket"]}
+
+
 def test_health(app_bridge):
     r = client(app_bridge).get("/v1/health")
     assert r.status_code == 200
@@ -83,7 +89,8 @@ def test_revoked_device_cannot_mint_tokens(app_bridge):
         "/v1/pair/claim",
         json={"code": code, "public_key": TEST_PUBLIC_KEY, "device_name": "Mac", "platform": "macos"},
     ).json()
-    assert c.delete(f"/v1/devices/{claim['device_id']}").status_code == 200
+    headers = auth_headers(c, claim["device_id"], claim["refresh_token"])
+    assert c.delete(f"/v1/devices/{claim['device_id']}", headers=headers).status_code == 200
     tok = c.post(
         "/v1/token", json={"device_id": claim["device_id"], "refresh_token": claim["refresh_token"]}
     )
@@ -97,8 +104,12 @@ def test_revoked_device_disappears_from_active_list(app_bridge):
         "/v1/pair/claim",
         json={"code": code, "public_key": TEST_PUBLIC_KEY, "device_name": "Mac", "platform": "macos"},
     ).json()
-    c.delete(f"/v1/devices/{claim['device_id']}")
-    devices = c.get("/v1/devices").json()
+    c.delete(f"/v1/devices/{claim['device_id']}",
+             headers=auth_headers(c, claim["device_id"], claim["refresh_token"]))
+    # A revoked device cannot authenticate the list, so inspect it through a second active device.
+    admin = app_bridge.state.bridge.registry
+    admin.add_device(device_id="admin", name="Admin", platform="ios", public_key="pk", refresh_token="admin-refresh")
+    devices = c.get("/v1/devices", headers=auth_headers(c, "admin", "admin-refresh")).json()
     assert devices[0]["revoked"] is True
     assert "refresh_token" not in devices[0]
 
@@ -194,7 +205,8 @@ def test_revoking_a_device_kills_its_outstanding_ticket(app_bridge):
         json={"device_id": claim["device_id"], "refresh_token": claim["refresh_token"]},
     ).json()["ws_ticket"]
 
-    c.delete(f"/v1/devices/{claim['device_id']}")
+    c.delete(f"/v1/devices/{claim['device_id']}",
+             headers=auth_headers(c, claim["device_id"], claim["refresh_token"]))
     assert app_bridge.state.bridge.tickets.redeem(ticket) is None
 
 
@@ -249,18 +261,43 @@ def test_remote_gateway_url_is_refused(tmp_path):
         create_app(config)
 
 
+def test_device_list_and_revoke_require_fresh_active_ticket(app_bridge):
+    c = client(app_bridge)
+    reg = app_bridge.state.bridge.registry
+    for device in ('admin', 'target'):
+        reg.add_device(device_id=device, name=device, platform='ios', public_key='pk',
+                       refresh_token=device+'-refresh')
+
+    for headers in ({}, {'Authorization': 'Bearer invalid'}):
+        assert c.get('/v1/devices', headers=headers).status_code == 401
+        assert c.delete('/v1/devices/target', headers=headers).status_code == 401
+    assert reg.is_active('target')
+
+    list_headers = auth_headers(c, 'admin', 'admin-refresh')
+    response = c.get('/v1/devices', headers=list_headers)
+    assert response.status_code == 200
+    assert {row['device_id'] for row in response.json()} == {'admin', 'target'}
+    assert c.get('/v1/devices', headers=list_headers).status_code == 401  # single use
+
+    revoke_headers = auth_headers(c, 'admin', 'admin-refresh')
+    assert c.delete('/v1/devices/target', headers=revoke_headers).status_code == 200
+    assert not reg.is_active('target')
+    assert c.delete('/v1/devices/target', headers=revoke_headers).status_code == 401
+
+
 def test_permanent_cleanup_of_revoked_device(app_bridge):
     c = client(app_bridge)
     reg = app_bridge.state.bridge.registry
     for device in ('admin', 'old'):
         reg.add_device(device_id=device, name=device, platform='ios', public_key='pk', refresh_token=device+'-refresh')
     old_ticket = c.post('/v1/token', json={'device_id': 'old', 'refresh_token': 'old-refresh'}).json()['ws_ticket']
-    assert c.delete('/v1/devices/old').status_code == 200
+    assert c.delete('/v1/devices/old', headers=auth_headers(c, 'admin', 'admin-refresh')).status_code == 200
     ticket = c.post('/v1/token', json={'device_id': 'admin', 'refresh_token': 'admin-refresh'}).json()['ws_ticket']
     response = c.delete('/v1/devices/old/revoked', headers={'Authorization': 'Bearer '+ticket})
     assert response.status_code == 200
     assert reg.get('old') is None
-    assert all(d['device_id'] != 'old' for d in c.get('/v1/devices').json())
+    assert all(d['device_id'] != 'old' for d in c.get(
+        '/v1/devices', headers=auth_headers(c, 'admin', 'admin-refresh')).json())
     assert c.post('/v1/token', json={'device_id': 'old', 'refresh_token': 'old-refresh'}).status_code == 401
     assert c.get('/v1/bot-icons', headers={'Authorization': 'Bearer '+old_ticket}).status_code == 401
     assert c.delete('/v1/devices/old/revoked', headers={'Authorization': 'Bearer '+ticket}).status_code == 401
