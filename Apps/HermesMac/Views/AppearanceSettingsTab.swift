@@ -35,7 +35,7 @@ struct AppearanceSettingsTab: View {
                     .accessibilityIdentifier("appearanceOpacitySlider")
 
                 Text("\(percent) %")
-                    .font(TypeScale.font(TypeScale.caption, design: .monospaced))
+                    .font(.system(size: TypeScale.caption, design: .monospaced))
                     .foregroundStyle(Tokens.textSecondary)
                     .monospacedDigit()
                     .frame(width: 44, alignment: .trailing)
