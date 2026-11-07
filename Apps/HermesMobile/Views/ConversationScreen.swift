@@ -34,6 +34,11 @@ struct ConversationScreen: View {
     /// disappearing, so it is a fact about the scroll position rather than a guess — it decides
     /// both whether new tokens may pull the view down and whether the way back is offered.
     @State private var isAtBottom = true
+
+    /// Bumped when a conversation finishes opening. The jump runs a few times because a lazy
+    /// transcript lays its rows out over several frames, and a single scroll taken on the first
+    /// frame lands near the top of the history instead of its end.
+    @State private var openScrollSignal = 0
     @State private var showAttachmentMenu = false
     @State private var attachmentSource: AttachmentSource?
 
@@ -340,6 +345,10 @@ struct ConversationScreen: View {
                 keyboardHeight = 0
                 isDraggingTranscript = false
             }
+            .onChange(of: openScrollSignal) {
+                // Open lands at the newest message, however tall the transcript turns out to be.
+                settleAtBottom(proxy)
+            }
             .onChange(of: model.transcript.count) {
                 // A message the user just sent is a reason to go down even from mid-history;
                 // anything else follows only when the view was already at the end.
@@ -573,6 +582,8 @@ struct ConversationScreen: View {
                 pendingAttachmentsBar
             }
 
+            // The record button is in the composer beside send; this line keeps only the
+            // "speak replies" opt-in.
             voiceRow
 
             Hairline(color: Tokens.border)
@@ -582,6 +593,10 @@ struct ConversationScreen: View {
                      isSending: model.isBusy,
                      isDisabled: sessionID == nil,
                      hasAttachments: !model.pendingAttachments.isEmpty,
+                     micSystemImage: micGlyph,
+                     micTint: voice.state == .recording ? Tokens.danger : nil,
+                     micAccessibilityLabel: micLabel,
+                     isMicEnabled: sessionID != nil,
                      onSend: { Task { await model.send() } },
                      onAttach: {
                          withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
@@ -608,16 +623,15 @@ struct ConversationScreen: View {
         .background(Tokens.canvas)
     }
 
-    /// The microphone and the "speak replies" opt-in, on one quiet line above the field.
+    /// The "speak replies" opt-in.
     ///
-    /// A transcript fills the draft and never sends on its own: misrecognition is common
-    /// enough that the user should see the words before they leave the phone. Speaking is
-    /// opt-in per visit and only starts for replies that arrive while it is on.
+    /// It used to share this line with the record button. The record button now sits inside the
+    /// composer, immediately left of send — where the control that starts a message belongs — so
+    /// this row carries only the listening preference, and disappears when there is nothing to
+    /// speak.
+    @ViewBuilder
     private var voiceRow: some View {
         HStack(spacing: 8) {
-            VoiceRecordButton(controller: voice,
-                              isEnabled: sessionID != nil,
-                              onTranscript: insertTranscript)
             VoiceSpeakerToggle(controller: voice,
                                isEnabled: Binding(get: { speakReplies },
                                                   set: { enabled in
@@ -711,6 +725,24 @@ struct ConversationScreen: View {
         lastSeenRequestCount = model.pendingRequests.count
         hasLoaded = true
         isOpening = false
+        openScrollSignal += 1
+    }
+
+    /// Scroll to the newest message over the next few frames.
+    ///
+    /// `ScrollViewProxy.scrollTo` is only as good as the layout it is called from: on the first
+    /// frame after `resume`, a lazy transcript has built its first screenful, so the proxy scrolls
+    /// to a bottom that then moves as the rest lays out — which is why opening a conversation
+    /// started somewhere in the middle of its history.
+    private func settleAtBottom(_ proxy: ScrollViewProxy) {
+        scroll(proxy, animated: false)
+        Task {
+            for delay in [UInt64(80_000_000), 220_000_000, 480_000_000] {
+                try? await Task.sleep(nanoseconds: delay)
+                guard !isDraggingTranscript else { return }
+                scroll(proxy, animated: false)
+            }
+        }
     }
 
     /// Forget this bot's stored session and open a fresh one. The old session is left on
@@ -738,6 +770,25 @@ struct ConversationScreen: View {
                 set: { presented in
                     if !presented { notice = nil }
                 })
+    }
+
+    /// The microphone's glyph and label, from the voice controller's own state — the composer
+    /// cannot know whether it is idle, listening or transcribing.
+    private var micGlyph: String {
+        switch voice.state {
+        case .recording: return "stop.circle.fill"
+        case .requestingPermission, .transcribing: return "waveform"
+        default: return "mic"
+        }
+    }
+
+    private var micLabel: String {
+        switch voice.state {
+        case .recording: return "Stop and transcribe"
+        case .requestingPermission: return "Waiting for microphone permission"
+        case .transcribing: return "Transcribing"
+        default: return "Record a voice message"
+        }
     }
 
     // MARK: Voice

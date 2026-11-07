@@ -17,6 +17,9 @@ struct ConversationHeader: View {
     /// ⌘, — the real Settings scene, opened from the chat's own menu.
     @Environment(\.openSettings) private var openSettings
 
+    /// Reset is the one menu item here that makes history disappear, so it asks first.
+    @State private var confirmingReset = false
+
     private var title: String {
         store.selectedBot?.displayName ?? model.hostName
     }
@@ -73,6 +76,16 @@ struct ConversationHeader: View {
         }
         .frame(height: 48)
         .background(Tokens.canvas)
+        .confirmationDialog("Reset this conversation?",
+                            isPresented: $confirmingReset,
+                            titleVisibility: .visible) {
+            Button("Reset conversation", role: .destructive) {
+                Task { await model.resetConversation() }
+            }
+            Button("Keep it", role: .cancel) {}
+        } message: {
+            Text("Hermey starts a fresh conversation with \(title). The current one stays on the host, but this app will not reopen it.")
+        }
     }
 
     /// Widths at which each optional chip stops fitting next to a one-line title and the two
@@ -168,6 +181,19 @@ struct ConversationHeader: View {
                 }
                 Divider()
             }
+            // Two things a long conversation needs and only the phone had: compact it now
+            // rather than waiting for the threshold, and start over from an empty conversation.
+            Button("Compact Conversation") {
+                Task { await model.compressNow() }
+            }
+            .disabled(model.selectedSessionID == nil || model.isStreaming)
+
+            Button("Reset Conversation…") {
+                confirmingReset = true
+            }
+            .disabled(model.selectedSessionID == nil || model.isStreaming)
+
+            Divider()
             Button("Command palette…") { store.openPalette() }
             Button("Settings…") { openSettings() }
             Divider()

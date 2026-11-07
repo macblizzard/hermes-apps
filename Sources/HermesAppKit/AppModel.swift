@@ -780,6 +780,19 @@ public final class AppModel: ObservableObject {
         runningSessions.remove(stored)
     }
 
+    /// A menu's "reset conversation": forget the bot's conversation and open a fresh one at once.
+    ///
+    /// `resetEndlessSession` on its own leaves an empty pane — no transcript, and a composer that
+    /// cannot send until something opens a session — so a menu that only cleared would look like
+    /// the app had lost the conversation instead of starting a new one. The old session stays on
+    /// the host, because deleting history is not what "reset" means here.
+    public func resetConversation() async {
+        guard let bot = selectedBotID else { return }
+        resetEndlessSession(for: bot)
+        _ = await endlessSession(for: bot)
+        await loadBotPreviews(force: true)
+    }
+
     /// What the bridge says this bot's conversation is, normalised for `EndlessSessionPolicy`.
     ///
     /// Never throws: a read the client cannot make is `.unavailable`, which sends the open down the
