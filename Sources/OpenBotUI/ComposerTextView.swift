@@ -99,6 +99,10 @@ struct ComposerTextView: NSViewRepresentable {
             guard let view = notification.object as? NSTextView else { return }
             if parent.text != view.string { parent.text = view.string }
             resize(view)
+            // Past the eight-line cap the field scrolls inside itself, and AppKit does not move the
+            // clip view for us when the *frame* is fixed from the outside: the caret slid below the
+            // visible range and the user was typing blind.
+            view.scrollRangeToVisible(view.selectedRange())
         }
 
         func textViewDidBeginEditing(_ notification: Notification) {
@@ -115,6 +119,12 @@ struct ComposerTextView: NSViewRepresentable {
             if let event = NSApp.currentEvent, event.modifierFlags.contains(.shift) { return false }
             parent.onSend()
             return true
+        }
+
+        /// Arrow keys, clicks, selection drags: wherever the caret ends up, keep it on screen.
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let view = notification.object as? NSTextView else { return }
+            view.scrollRangeToVisible(view.selectedRange())
         }
 
         /// Report the height the text needs, clamped, so the card grows by a line at a time instead
