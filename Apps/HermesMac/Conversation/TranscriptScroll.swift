@@ -44,15 +44,16 @@ struct TranscriptScroll: View {
 
     private let bottomID = "transcript-bottom"
 
-    /// The scroll view's own coordinate space, where the end sentinel's edge can be compared with
-    /// the viewport it shares.
-    private static let transcriptSpace = "transcript-scroll"
-
-    /// True while new content may pull the transcript down. One measurement — the end sentinel's
-    /// bottom edge against the viewport's height, both in the scroll view's space — feeds both
-    /// this and the floating control, so the auto-scroll and the button can never disagree about
-    /// whether the newest message is on screen.
+    /// True while new content may pull the transcript down. Reported by the scroll view itself, so
+    /// the auto-scroll and the floating control can never disagree about whether the newest message
+    /// is on screen.
     @State private var followsBottom = true
+
+    /// Counts requests to go to the newest message. The scroll view's own position is what the
+    /// jump is made from (see `ScrollViewportProbe`), because a proxy jump runs before the lazy
+    /// transcript has laid out and lands short of the bottom — the reason a freshly opened
+    /// conversation started mid-history.
+    @State private var scrollRequest = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -85,30 +86,23 @@ struct TranscriptScroll: View {
     /// phone's transcript hit with less on screen.
     private var transcript: some View {
         ScrollViewReader { proxy in
-            // The viewport's height is needed to judge the sentinel's edge; a `GeometryReader`
-            // around the scroll view reports exactly the frame the content scrolls through.
-            GeometryReader { viewport in
-                ScrollView(.vertical, showsIndicators: true) {
-                    VStack(spacing: 0) {
-                        rows
-                        endSentinel
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(spacing: 0) {
+                    rows
+                    endSentinel
+                }
+                // The measuring device: it reads the scroll view's own offset and height, and it
+                // is what performs the jump when `scrollRequest` changes.
+                .background(
+                    ScrollViewportProbe(scrollSignal: scrollRequest) { atBottom in
+                        if atBottom != followsBottom { followsBottom = atBottom }
                     }
-                }
-                // The space the measurement is taken in: the scroll view's own frame, which stays
-                // put while its content moves. That is what makes the sentinel's edge a reading of
-                // the scroll position rather than a constant.
-                .coordinateSpace(name: Self.transcriptSpace)
-                // Floating over the transcript's foot — the strip just above the composer, which
-                // is where the eye goes looking for it.
-                .overlay(alignment: .bottom) { foot(proxy) }
-                .onPreferenceChange(EndEdgeKey.self) { edge in
-                    // 24 pt of slack: a reply that has just started is "at the bottom" even though
-                    // its last line may still be a hair below the fold.
-                    let atBottom = edge <= viewport.size.height + 24
-                    if atBottom != followsBottom { followsBottom = atBottom }
-                }
-                .onAppear { proxy.scrollTo(bottomID, anchor: .bottom) }
+                )
             }
+            // Floating over the transcript's foot — the strip just above the composer, which is
+            // where the eye goes looking for it.
+            .overlay(alignment: .bottom) { foot }
+            .onAppear { scrollRequest += 1 }
 
             .onChange(of: model.transcript.count) { _, _ in follow(proxy) }
             .onChange(of: model.streamingText) { _, _ in follow(proxy) }
@@ -166,28 +160,16 @@ struct TranscriptScroll: View {
         Color.clear
             .frame(height: 1)
             .id(bottomID)
-            // The verdict the floating button depends on: where this marker's bottom edge sits in
-            // the scroll view's own space. A plain (non-lazy) view in a `VStack` is never
-            // *removed*, so `onAppear`/`onDisappear` reported nothing when the transcript scrolled
-            // away from it — the button never appeared. A preference re-evaluates on every scroll.
-            .background(
-                GeometryReader { marker in
-                    Color.clear.preference(
-                        key: EndEdgeKey.self,
-                        value: marker.frame(in: .named(Self.transcriptSpace)).maxY
-                    )
-                }
-            )
     }
 
     /// The foot of the viewport: the control that returns to the newest message.
-    private func foot(_ proxy: ScrollViewProxy) -> some View {
+    private var foot: some View {
         ZStack(alignment: .bottom) {
             Group {
                 // Hidden while the search row is up: the search owns the scroll position then,
                 // and this would compete with the chevrons that step through matches.
                 if !searching, !followsBottom {
-                    scrollToBottomButton(proxy)
+                    scrollToBottomButton
                 }
             }
             .animation(.easeOut(duration: 0.18), value: followsBottom)
@@ -203,28 +185,30 @@ struct TranscriptScroll: View {
     /// floating control is the way back, and taking it re-arms the follow.
     private func follow(_ proxy: ScrollViewProxy) {
         guard !searching, followsBottom else { return }
-        scroll(proxy)
+        // `proxy` is kept for the search jumps; the jump to the newest message is the probe's.
+        _ = proxy
+        scrollRequest += 1
     }
 
     /// A different conversation opens at its newest message, whatever the previous one's reading
     /// position was — the follow is re-armed with it.
     private func openSession(_ proxy: ScrollViewProxy) {
+        _ = proxy
         query = ""
         matchIndex = 0
         followsBottom = true
-        proxy.scrollTo(bottomID, anchor: .bottom)
+        scrollRequest += 1
     }
 
 
     /// The way back down: a circle centred on the column, floating just above the composer, with
     /// the same quiet surface as the composer's own controls. Drawn only when the measurement
     /// says a message is out of sight.
-    private func scrollToBottomButton(_ proxy: ScrollViewProxy) -> some View {
+    private var scrollToBottomButton: some View {
         Button {
-            // No `followsBottom = true` here: the sentinel is still below the fold while the
-            // scroll animates, and claiming otherwise would flip the verdict back and make the
-            // button blink out and in on the way down. Landing sets it.
-            scroll(proxy, duration: 0.28)
+            // No `followsBottom = true` here: the transcript is still above its end while the
+            // jump happens, and the probe reports the verdict when it lands.
+            scrollRequest += 1
         } label: {
             Image(systemName: "chevron.down")
                 .font(.system(size: 12, weight: .semibold))
@@ -322,12 +306,6 @@ struct TranscriptScroll: View {
         searching = true
         searchFocused = true
     }
-
-    private func scroll(_ proxy: ScrollViewProxy, duration: Double = 0.15) {
-        withAnimation(.easeOut(duration: duration)) {
-            proxy.scrollTo(bottomID, anchor: .bottom)
-        }
-    }
 }
 
 
@@ -344,12 +322,12 @@ struct StreamingAssistantBubble: View {
             if text.isEmpty {
                 HStack(spacing: 8) {
                     SpinningRing(color: Tokens.accent, size: 11, lineWidth: 1.5)
-                    Text("Hermes is working…")
+                    Text("Hermey is working…")
                         .font(TypeScale.font(Tokens.textMD))
                         .foregroundStyle(Tokens.textMuted)
                 }
                 .padding(.vertical, 2)
-                .accessibilityLabel("Hermes is working")
+                .accessibilityLabel("Hermey is working")
             } else {
                 MarkdownTextView(text: text, isStreaming: true)
             }
@@ -422,18 +400,4 @@ private struct StreamingBubblePreview: View {
 
 #Preview("Streaming bubble") {
     StreamingBubblePreview()
-}
-
-/// The end sentinel's bottom edge, in the scroll view's own coordinate space.
-///
-/// A preference rather than `@State`: SwiftUI re-evaluates preferences while the scroll offset
-/// changes, which is the one signal a `ScrollView` gives about *where* it is without reaching into
-/// AppKit.
-struct EndEdgeKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        // The last measurement wins: a scroll may draw several frames before it settles.
-        value = nextValue()
-    }
 }
