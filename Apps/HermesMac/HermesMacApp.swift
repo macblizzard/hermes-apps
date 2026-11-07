@@ -18,7 +18,7 @@ struct HermesMacApp: App {
     @StateObject private var store = UITestFixture.storeForLaunch()
 
     var body: some Scene {
-        WindowGroup("Hermes") {
+        WindowGroup("Hermey") {
             WorkspaceRoot(store: store)
                 // The shell lays out exactly this much chrome around the conversation: the 8 pt
                 // window surround on each side, the bot panel at its floor, the divider strip and

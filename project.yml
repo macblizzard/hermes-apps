@@ -43,7 +43,10 @@ targets:
     info:
       path: Apps/HermesMac/Info.plist
       properties:
-        CFBundleDisplayName: Hermes
+        CFBundleDisplayName: Hermey
+        # The menu bar reads CFBundleName, not the display name: without it the app menu says
+        # "HermesMac" while the Dock says "Hermey".
+        CFBundleName: Hermey
         # Variables, not literals: CI passes CURRENT_PROJECT_VERSION=<run number> so every
         # build is strictly newer than the last one, which is what makes a sideload source
         # show an *update* instead of re-installing the same version forever.
@@ -96,7 +99,8 @@ targets:
     info:
       path: Apps/HermesMobile/Info.plist
       properties:
-        CFBundleDisplayName: Hermes
+        CFBundleDisplayName: Hermey
+        CFBundleName: Hermey
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}

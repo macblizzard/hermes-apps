@@ -101,7 +101,7 @@ struct BotListScreen: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(Tokens.canvas)
-        .navigationTitle("Hermes Bots")
+        .navigationTitle("Hermey")
         .navigationBarTitleDisplayMode(.inline)
         .searchable(text: $query,
                     placement: .navigationBarDrawer(displayMode: .always),

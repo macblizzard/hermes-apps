@@ -118,7 +118,7 @@ def main() -> int:
         "featuredApps": [info["CFBundleIdentifier"]],
         "apps": [
             {
-                "name": "Hermes",
+                "name": "Hermey",
                 "bundleIdentifier": info["CFBundleIdentifier"],
                 "developerName": "Mohammad",
                 "subtitle": "Your Hermes bots, on your phone",

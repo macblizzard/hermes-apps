@@ -55,7 +55,7 @@ struct PairHostSheet: View {
                 .font(TypeScale.font(Tokens.textXL, weight: .semibold))
                 .foregroundStyle(Tokens.textPrimary)
 
-            Text("Hermes talks to your own host over its WebSocket relay. Nothing is sent until you press Pair.")
+            Text("Hermey talks to your own host over its WebSocket relay. Nothing is sent until you press Pair.")
                 .font(TypeScale.font(Tokens.textSM))
                 .foregroundStyle(Tokens.textMuted)
                 .fixedSize(horizontal: false, vertical: true)

@@ -24,10 +24,10 @@ enum AppVersion {
     /// the version it shows comes from the same bundle keys as the Settings tab.
     static func showStandardPanel() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "Hermes",
+            .applicationName: "Hermey",
             .applicationVersion: marketing,
             .version: "build \(build)",
-            .credits: NSAttributedString(string: "The Hermes native client for macOS and iPhone."),
+            .credits: NSAttributedString(string: "Hermey — the Hermes native client for macOS and iPhone."),
         ])
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -45,7 +45,7 @@ struct AboutSettingsTab: View {
 
     private var diagnostics: String {
         """
-        Hermes \(AppVersion.marketing) (build \(AppVersion.build))
+        Hermey \(AppVersion.marketing) (build \(AppVersion.build))
         macOS \(ProcessInfo.processInfo.operatingSystemVersionString)
         host: \(store.isPaired ? store.model.hostName : "not paired")
         """
@@ -58,7 +58,7 @@ struct AboutSettingsTab: View {
                     .resizable()
                     .frame(width: 64, height: 64)
 
-                Text("Hermes")
+                Text("Hermey")
                     .font(TypeScale.font(Tokens.textLG, weight: .semibold))
                     .foregroundStyle(Tokens.textPrimary)
 

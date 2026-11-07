@@ -41,7 +41,7 @@ jobs:
           xcodebuild -project HermesApps.xcodeproj -scheme HermesMac -configuration Release \
             -destination 'platform=macOS' -derivedDataPath build/dd \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            MARKETING_VERSION=1.${{ github.run_number }} CURRENT_PROJECT_VERSION=${{ github.run_number }} build
+            MARKETING_VERSION=0.1.${{ github.run_number }} CURRENT_PROJECT_VERSION=${{ github.run_number }} build
       - name: Zip macOS app (unsigned)
         run: |
           mkdir -p dist
@@ -132,7 +132,7 @@ jobs:
             -destination 'generic/platform=iOS' -archivePath build/HermesMobile.xcarchive \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" PROVISIONING_PROFILE_SPECIFIER="" \
-            MARKETING_VERSION=1.${{ github.run_number }} CURRENT_PROJECT_VERSION=${{ github.run_number }} archive
+            MARKETING_VERSION=0.1.${{ github.run_number }} CURRENT_PROJECT_VERSION=${{ github.run_number }} archive
       - name: Package Payload into .ipa
         run: |
           set -euo pipefail

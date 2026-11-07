@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from publish_source import read_ipa  # noqa: E402  (same directory, shared IPA reader)
 
-SOURCE_NAME = "Hermes"
+SOURCE_NAME = "Hermey"
 SOURCE_ID = "net.corvus.hermes.source"
 ICON_URL = "https://raw.githubusercontent.com/macblizzard/hermes-altstore/main/icon-512.png"
 
@@ -123,7 +123,7 @@ def main() -> int:
                 "NSCameraUsageDescription": "Scan the pairing code shown by your Hermes host to connect this device."}},
         })
         source.update({
-            "name": "Hermes",
+            "name": "Hermey",
             "identifier": SOURCE_ID,
             "sourceURL": f"https://raw.githubusercontent.com/{args.repo}/main/altstore.json",
             "schemaVersion": source.get("schemaVersion", 1),
