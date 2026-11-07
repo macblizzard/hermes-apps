@@ -1,0 +1,55 @@
+import AppKit
+import OpenBotUI
+import SwiftUI
+
+/// Settings → Appearance.
+///
+/// One control: how much of the desktop shows through the window. It is the only appearance
+/// preference this app has, and it is stored in `UserDefaults` so a relaunch keeps it. The slider
+/// stops at 55 %: below that the transcript is no longer readable over a bright desktop, and a
+/// setting that can make the app unusable is not a setting worth shipping.
+struct AppearanceSettingsTab: View {
+    @AppStorage(WindowAppearance.opacityKey) private var opacity: Double = 1
+
+    private var percent: Int { Int((opacity * 100).rounded()) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Window")
+                .font(TypeScale.font(Tokens.textLG, weight: .semibold))
+                .foregroundStyle(Tokens.textPrimary)
+
+            Text("How opaque the window is. Lower values let the desktop show through.")
+                .font(TypeScale.font(TypeScale.caption))
+                .foregroundStyle(Tokens.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                Image(systemName: "circle.lefthalf.filled")
+                    .foregroundStyle(Tokens.textMuted)
+                    .font(.system(size: 11))
+
+                Slider(value: $opacity,
+                       in: WindowAppearance.minimumOpacity...1,
+                       step: 0.01)
+                    .accessibilityIdentifier("appearanceOpacitySlider")
+
+                Text("\(percent) %")
+                    .font(TypeScale.font(TypeScale.caption, design: .monospaced))
+                    .foregroundStyle(Tokens.textSecondary)
+                    .monospacedDigit()
+                    .frame(width: 44, alignment: .trailing)
+            }
+
+            Button("Opaque") {
+                opacity = 1
+            }
+            .disabled(opacity >= 0.999)
+
+            Spacer(minLength: 0)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Tokens.canvas)
+    }
+}

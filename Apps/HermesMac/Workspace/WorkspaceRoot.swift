@@ -17,9 +17,16 @@ import SwiftUI
 struct WorkspaceRoot: View {
     @ObservedObject var store: WorkspaceStore
 
+    /// The window's transparency, set in Settings → Appearance. 1 is opaque.
+    @AppStorage(WindowAppearance.opacityKey) private var windowOpacity: Double = 1
+
     var body: some View {
         ZStack {
+            // At full opacity this is just the frame colour. Below it the fill fades with the
+            // shell, and `WindowBackdrop` clears the window's own background so the desktop is
+            // what shows through instead of a washed-out solid.
             Tokens.frame
+                .opacity(windowOpacity)
                 .ignoresSafeArea()
 
             WorkspaceShell(model: store.model, store: store)
@@ -34,9 +41,13 @@ struct WorkspaceRoot: View {
                 // rounded mask still shapes the top corners; the 13 pt clip below is what rounds
                 // the bottom ones inside the frame.
                 .padding(.bottom, 8)
+                // The whole shell fades together: fading only the frame would leave an opaque
+                // conversation floating in a translucent surround.
+                .opacity(windowOpacity)
 
             paletteOverlay
         }
+        .background(WindowBackdrop(opacity: windowOpacity))
         // One animation owner for the palette's whole lifecycle: the backdrop fades, the panel
         // rises a few points, and closing is the same motion in reverse.
         .animation(.easeOut(duration: 0.14), value: store.isPalettePresented)
